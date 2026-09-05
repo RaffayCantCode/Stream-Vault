@@ -57,6 +57,8 @@ function isTmdbReadAccessToken(token: string): boolean {
 // cold start. CDN caching is handled by `next: { revalidate }` on fetch calls.
 
 const inFlightTmdb = new Map<string, Promise<unknown>>();
+const tmdbMemoryCache = new Map<string, { data: unknown; timestamp: number }>();
+const TMDB_MEM_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 
 export async function tmdbFetch(
   path: string,
@@ -85,8 +87,14 @@ export async function tmdbFetch(
     }
 
     const fullUrl = url.toString();
-    if (!options?.noCache && inFlightTmdb.has(fullUrl)) {
-      return await inFlightTmdb.get(fullUrl);
+    if (!options?.noCache) {
+      const cached = tmdbMemoryCache.get(fullUrl);
+      if (cached && Date.now() - cached.timestamp < TMDB_MEM_CACHE_TTL) {
+        return cached.data;
+      }
+      if (inFlightTmdb.has(fullUrl)) {
+        return await inFlightTmdb.get(fullUrl);
+      }
     }
 
     // Dynamic cache times (in seconds) based on path type
@@ -130,6 +138,14 @@ export async function tmdbFetch(
             filtered.results = filtered.results.filter((item: any) => !isMediaItemHidden(item, hiddenSet));
           }
         } catch {}
+      }
+
+      if (filtered && !options?.noCache) {
+        if (tmdbMemoryCache.size > 500) {
+          const firstKey = tmdbMemoryCache.keys().next().value;
+          if (firstKey !== undefined) tmdbMemoryCache.delete(firstKey);
+        }
+        tmdbMemoryCache.set(fullUrl, { data: filtered, timestamp: Date.now() });
       }
 
       return filtered;

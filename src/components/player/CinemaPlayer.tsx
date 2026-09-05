@@ -8,21 +8,14 @@ import {
   Play,
   Pause,
   RotateCcw,
-  FastForward,
-  Volume2,
-  VolumeX,
-  Minimize2,
+  Maximize,
+  Minimize,
   Cloud,
   Layers,
-  Settings,
-  Cast,
-  Tv,
   X,
   Check,
   ChevronLeft,
   ChevronRight,
-  ChevronDown,
-  Globe,
   Server,
   SkipForward,
   Lock,
@@ -31,7 +24,6 @@ import { isEpisodeUpcoming } from "@/lib/episode-availability";
 import { ServerOption } from "./ServerSelectorModal";
 import { SOURCE_TAG_LABELS, TAG_STYLES, type SourceTag } from "@/lib/streaming-config";
 import { DrawerSeason, DrawerEpisode } from "./EpisodeDrawer";
-import { PlayerSettingsModal } from "./PlayerSettingsModal";
 import { useAmbientColor } from "@/hooks/useAmbientColor";
 
 export interface CinemaPlayerMetadata {
@@ -74,13 +66,15 @@ export function CinemaPlayer({
 }: CinemaPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const episodesScrollRef = useRef<HTMLDivElement>(null);
+  const rangeScrollRef = useRef<HTMLDivElement>(null);
+
+  const [canScrollRangeLeft, setCanScrollRangeLeft] = useState(false);
+  const [canScrollRangeRight, setCanScrollRangeRight] = useState(false);
 
   // Dynamic ambient color from poster
   const ambientPalette = useAmbientColor(metadata.backdropUrl || metadata.posterUrl);
 
-  // HUD Visibility
-  const [showControls, setShowControls] = useState(true);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
 
   // Popups state (matching screenshots 2 & 3)
   const [showEpisodeCarousel, setShowEpisodeCarousel] = useState(false);
@@ -126,40 +120,120 @@ export function CinemaPlayer({
   }, [metadata.season]);
 
   const [activeEpisodeRange, setActiveEpisodeRange] = useState<string | null>(null);
-  const [isTheaterMode, setIsTheaterMode] = useState(false);
-
   // Video state
   const [isPlaying, setIsPlaying] = useState(true);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Settings
-  const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [autoPlayNext, setAutoPlayNext] = useState(true);
-  const [autoSkipIntro, setAutoSkipIntro] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-
-  // Auto-hide controls timer
-  const resetControlsTimer = useCallback(() => {
-    setShowControls(true);
-    if (controlsTimeoutRef.current) {
-      clearTimeout(controlsTimeoutRef.current);
-    }
-    controlsTimeoutRef.current = setTimeout(() => {
-      if (!showEpisodeCarousel && !showServerMenu && !showSettingsModal) {
-        setShowControls(false);
+  const handleTogglePlay = useCallback(() => {
+    setIsPlaying((prev) => {
+      const next = !prev;
+      if (containerRef.current) {
+        const iframes = containerRef.current.querySelectorAll('iframe');
+        iframes.forEach((iframe) => {
+          if (iframe.contentWindow) {
+            iframe.contentWindow.postMessage(JSON.stringify({ cmd: "PLAY_TOGGLE" }), "*");
+            iframe.contentWindow.postMessage({ cmd: "PLAY_TOGGLE" }, "*");
+            iframe.contentWindow.postMessage({ command: next ? "play" : "pause" }, "*");
+            iframe.contentWindow.postMessage(JSON.stringify({ event: next ? "play" : "pause" }), "*");
+          }
+        });
       }
-    }, 3500);
-  }, [showEpisodeCarousel, showServerMenu, showSettingsModal]);
+      return next;
+    });
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const doc = document as any;
+    const isFull = doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement;
+    if (!isFull) {
+      const el = (containerRef.current || document.documentElement) as any;
+      if (el.requestFullscreen) el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
+      else if (el.msRequestFullscreen) el.msRequestFullscreen();
+    } else {
+      if (doc.exitFullscreen) doc.exitFullscreen();
+      else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
+      else if (doc.mozCancelFullScreen) doc.mozCancelFullScreen();
+      else if (doc.msExitFullscreen) doc.msExitFullscreen();
+    }
+  }, []);
 
   useEffect(() => {
-    resetControlsTimer();
-    return () => {
-      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    const handleFullscreenChange = () => {
+      const doc = document as any;
+      const isFull = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+      setIsFullscreen(isFull);
+      if (containerRef.current) {
+        const iframes = containerRef.current.querySelectorAll('iframe');
+        iframes.forEach((iframe) => {
+          if (iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ megaFullscreenState: isFull }, "*");
+          }
+        });
+      }
     };
-  }, [resetControlsTimer]);
+
+    const handleMessage = (e: MessageEvent) => {
+      if (!e.data) return;
+      const doc = document as any;
+      const { megaCommand, command } = e.data;
+      if (megaCommand === "toggleFullscreen" || command === "toggleFullscreen" || command === "requestFullscreen") {
+        toggleFullscreen();
+      } else if (megaCommand === "enterFullscreen" || command === "enterFullscreen") {
+        const el = (containerRef.current || document.documentElement) as any;
+        if (!doc.fullscreenElement && !doc.webkitFullscreenElement && !doc.mozFullScreenElement && !doc.msFullscreenElement) {
+          if (el.requestFullscreen) el.requestFullscreen();
+          else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+          else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
+          else if (el.msRequestFullscreen) el.msRequestFullscreen();
+        }
+      } else if (megaCommand === "exitFullscreen" || command === "exitFullscreen") {
+        if (doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement) {
+          if (doc.exitFullscreen) doc.exitFullscreen();
+          else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
+          else if (doc.mozCancelFullScreen) doc.mozCancelFullScreen();
+          else if (doc.msExitFullscreen) doc.msExitFullscreen();
+        }
+      } else if (megaCommand === "getFullscreenState") {
+        if (e.source) {
+          (e.source as Window).postMessage(
+            { megaFullscreenState: Boolean(doc.fullscreenElement || doc.webkitFullscreenElement) },
+            { targetOrigin: "*" }
+          );
+        }
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.code === "Space") {
+        e.preventDefault();
+        handleTogglePlay();
+      }
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
+    window.addEventListener("message", handleMessage);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
+      window.removeEventListener("message", handleMessage);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [toggleFullscreen, handleTogglePlay]);
+
+
 
   const activeSeasonData = seasons?.find((s) => s.season_number === selectedSeasonNum) || seasons?.[0];
 
@@ -321,6 +395,46 @@ export function CinemaPlayer({
     return all.filter((e) => e.episode_number >= selected.start && e.episode_number <= selected.end);
   }, [activeSeasonData, activeEpisodeRange, episodeRanges]);
 
+  const checkRangeScroll = useCallback(() => {
+    if (rangeScrollRef.current) {
+      const { scrollLeft, scrollWidth, clientWidth } = rangeScrollRef.current;
+      setCanScrollRangeLeft(scrollLeft > 0);
+      setCanScrollRangeRight(Math.ceil(scrollLeft + clientWidth) < scrollWidth);
+    }
+  }, []);
+
+  const scrollRange = useCallback((direction: "left" | "right") => {
+    if (rangeScrollRef.current) {
+      const scrollAmount = direction === "left" ? -180 : 180;
+      rangeScrollRef.current.scrollBy({ left: scrollAmount, behavior: "smooth" });
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = rangeScrollRef.current;
+    if (el) {
+      checkRangeScroll();
+      el.addEventListener("scroll", checkRangeScroll);
+      window.addEventListener("resize", checkRangeScroll);
+      return () => {
+        el.removeEventListener("scroll", checkRangeScroll);
+        window.removeEventListener("resize", checkRangeScroll);
+      };
+    }
+  }, [checkRangeScroll, showEpisodeCarousel, episodeRanges.length]);
+
+  useEffect(() => {
+    if (showEpisodeCarousel && rangeScrollRef.current) {
+      const timer = setTimeout(() => {
+        const activeBtn = rangeScrollRef.current?.querySelector('[data-active="true"]');
+        if (activeBtn) {
+          activeBtn.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [showEpisodeCarousel, activeEpisodeRange]);
+
   // Auto-scroll episode carousel to the current episode card
   useEffect(() => {
     if (showEpisodeCarousel && episodesScrollRef.current) {
@@ -385,12 +499,7 @@ export function CinemaPlayer({
     }
   };
 
-  const formatTime = (secs: number) => {
-    if (isNaN(secs) || secs < 0) return "0:00";
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    return `${m}:${s < 10 ? "0" : ""}${s}`;
-  };
+
 
   // Lock body and html scroll so player page perfectly fits screen without overflow
   useEffect(() => {
@@ -404,79 +513,15 @@ export function CinemaPlayer({
   return (
     <div
       ref={containerRef}
-      onMouseMove={resetControlsTimer}
-      onClick={resetControlsTimer}
-      className="fixed inset-0 w-full h-[100dvh] max-w-full max-h-full bg-black select-none overflow-hidden flex flex-col justify-between z-50 font-sans overscroll-none touch-manipulation"
+      className="fixed inset-0 w-full h-[100dvh] max-w-full max-h-full bg-black select-none overflow-hidden flex flex-col z-50 font-sans overscroll-none"
       style={ambientPalette.cssVars as React.CSSProperties}
     >
-      {/* ── Background Video Screen ── */}
-      <div className="absolute inset-0 w-full h-full bg-black z-0 flex items-center justify-center">
-        {/* Dynamic Ambient Glow Behind Screen (only on global theme) */}
-        <div
-          className="absolute inset-0 -z-10 blur-3xl opacity-50 pointer-events-none transition-opacity duration-1000"
-          style={{
-            background: `radial-gradient(ellipse 90% 70% at 50% 50%, var(--ambient-glow, transparent), transparent 75%)`,
-          }}
-        />
-
-        <div key={reloadKey} className={`w-full h-full relative transition-all duration-300 ${isTheaterMode ? "max-w-none" : "w-full"}`}>
-          {React.isValidElement(children)
-            ? React.cloneElement(children as React.ReactElement<any>, {
-                onModeChange: setPlayerMode,
-                isPlaying,
-                onTogglePlay: setIsPlaying,
-                onProgress: (cur: number, dur: number) => {
-                  setCurrentTime(cur);
-                  if (dur > 0) setDuration(dur);
-                },
-              })
-            : children}
-        </div>
-
-        {/* ── Reloading Source Floating Feedback ── */}
-        {isReloading && (
-          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-black/90 border border-white/20 backdrop-blur-md text-xs font-bold text-white flex items-center gap-2 shadow-2xl animate-fade-in pointer-events-none">
-            <RotateCcw className="w-4 h-4 animate-spin text-primary" />
-            <span>Reloading current source...</span>
-          </div>
-        )}
-      </div>
-
-      {/* ── Top Bar Wakeup Detector (mouse hover/move on desktop, tap on mobile) ── */}
-      <div
-        onMouseEnter={resetControlsTimer}
-        onMouseMove={resetControlsTimer}
-        onTouchStart={resetControlsTimer}
-        onClick={resetControlsTimer}
-        className={`fixed top-0 inset-x-0 h-20 z-30 transition-opacity duration-200 ${
-          showControls ? "pointer-events-none opacity-0" : "pointer-events-auto opacity-100"
-        }`}
-      />
-
-      {/* ── Mobile Floating Controls Reveal Pill ── */}
-      {!showControls && (
-        <button
-          type="button"
-          onClick={resetControlsTimer}
-          onTouchStart={resetControlsTimer}
-          aria-label="Show player controls"
-          className="fixed top-3 right-3 z-40 sm:hidden p-2 rounded-full bg-black/75 hover:bg-black text-white/80 hover:text-white border border-white/20 backdrop-blur-md shadow-xl active:scale-95 cursor-pointer touch-manipulation"
-        >
-          <ChevronDown className="w-4 h-4" />
-        </button>
-      )}
-
-      {/* ── Top Cinema Navigation Bar ── */}
-      <div
-        onMouseEnter={() => setShowControls(true)}
-        className={`fixed top-0 inset-x-0 z-40 h-20 px-3 sm:px-6 md:px-8 flex items-center justify-between bg-gradient-to-b from-black via-black/90 to-transparent backdrop-blur-md pt-[max(0.5rem,env(safe-area-inset-top))] pb-6 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] transition-all duration-300 ${
-          showControls ? "opacity-100 translate-y-0 pointer-events-auto" : "opacity-0 -translate-y-2 pointer-events-none"
-        }`}
-      >
-        {/* Left: Back to Media Page Button */}
+      {/* ── Top Bar: Single Site Control Layer ── */}
+      <header className="w-full h-14 sm:h-16 flex-shrink-0 z-40 px-3 sm:px-6 flex items-center justify-between bg-zinc-950/95 border-b border-white/10 backdrop-blur-md">
+        {/* Left: Back / Exit Button */}
         <Link
           href={metadata.backUrl}
-          className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs border border-white/15 backdrop-blur-md transition-all shadow-md cursor-pointer group"
+          className="flex items-center gap-2 px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-2xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs border border-white/15 backdrop-blur-md transition-all shadow-md cursor-pointer shrink-0 group"
           title="Back to Details"
         >
           <ArrowLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
@@ -484,7 +529,7 @@ export function CinemaPlayer({
         </Link>
 
         {/* Center: Title & Episode Subtitle & Source Badge */}
-        <div className="flex flex-col items-center text-center max-w-[40%] sm:max-w-[48%] truncate px-2">
+        <div className="flex flex-col items-center text-center max-w-[34%] sm:max-w-[48%] truncate px-2">
           <div className="flex items-center justify-center gap-2 max-w-full">
             <h2 className="text-xs sm:text-sm md:text-base font-black text-white tracking-tight drop-shadow-md truncate">
               {metadata.title}
@@ -502,16 +547,16 @@ export function CinemaPlayer({
           </span>
         </div>
 
-        {/* Right: Quick Action Buttons (Episodes, Servers, Next Source, Reload) */}
-        <div className="flex items-center gap-2 sm:gap-2.5">
-          {/* Episodes Drawer Button (if TV/Anime) */}
+        {/* Right: Site Control Actions */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Episode selection (if TV/Anime with episodes) */}
           {seasons && seasons.length > 0 && (
             <button
               onClick={() => {
                 setShowEpisodeCarousel(!showEpisodeCarousel);
                 setShowServerMenu(false);
               }}
-              className={`px-3 py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
+              className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
                 showEpisodeCarousel
                   ? "bg-white text-black shadow-lg"
                   : "bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md"
@@ -523,13 +568,13 @@ export function CinemaPlayer({
             </button>
           )}
 
-          {/* Sources Button */}
+          {/* Sources selection */}
           <button
             onClick={() => {
               setShowServerMenu(!showServerMenu);
               setShowEpisodeCarousel(false);
             }}
-            className={`px-3 py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
+            className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
               showServerMenu
                 ? "bg-white text-black shadow-lg"
                 : "bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md"
@@ -544,30 +589,88 @@ export function CinemaPlayer({
           {servers && servers.length > 1 && (
             <button
               onClick={handleNextSource}
-              className="px-2.5 sm:px-3 py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
+              className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
               title="Next Source"
             >
               <SkipForward className="w-4 h-4 text-primary" />
-              <span className="hidden sm:inline">Next Source</span>
+              <span className="hidden sm:inline">Next</span>
             </button>
           )}
+
+          {/* Play / Pause Toggle Button */}
+          <button
+            onClick={handleTogglePlay}
+            className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
+            title={isPlaying ? "Pause" : "Play"}
+          >
+            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+          </button>
 
           {/* Reload Source Button */}
           <button
             onClick={handleReloadSource}
             disabled={isReloading}
-            className="px-3 py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95 disabled:opacity-60"
+            className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95 disabled:opacity-60"
             title="Reload Current Source"
           >
             <RotateCcw className={`w-4 h-4 ${isReloading ? "animate-spin text-primary" : ""}`} />
-            <span className="hidden md:inline">{isReloading ? "Reloading..." : "Reload"}</span>
+            <span className="hidden lg:inline">{isReloading ? "Reloading..." : "Reload"}</span>
+          </button>
+
+          {/* Fullscreen Toggle Button */}
+          <button
+            onClick={toggleFullscreen}
+            className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
+            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+          >
+            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
           </button>
         </div>
-      </div>
+      </header>
+
+      {/* ── Main Streaming Viewport: Directly beneath top bar, completely unobstructed ── */}
+      <main className="flex-1 w-full relative min-h-0 bg-black flex items-center justify-center overflow-hidden z-10">
+        {/* Dynamic Ambient Glow Behind Screen */}
+        <div
+          className="absolute inset-0 -z-10 blur-3xl opacity-40 pointer-events-none transition-opacity duration-1000"
+          style={{
+            background: `radial-gradient(ellipse 90% 70% at 50% 50%, var(--ambient-glow, transparent), transparent 75%)`,
+          }}
+        />
+
+        <div key={reloadKey} className="w-full h-full relative flex items-center justify-center">
+          {React.isValidElement(children)
+            ? React.cloneElement(children as React.ReactElement<any>, {
+                onModeChange: setPlayerMode,
+                isPlaying,
+                onTogglePlay: setIsPlaying,
+              })
+            : children}
+        </div>
+
+        {/* Reloading Source Floating Feedback */}
+        {isReloading && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-black/90 border border-white/20 backdrop-blur-md text-xs font-bold text-white flex items-center gap-2 shadow-2xl animate-fade-in pointer-events-none">
+            <RotateCcw className="w-4 h-4 animate-spin text-primary" />
+            <span>Reloading current source...</span>
+          </div>
+        )}
+      </main>
+
+      {/* ── Modal Backdrops ── */}
+      {(showEpisodeCarousel || showServerMenu) && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs transition-opacity"
+          onClick={() => {
+            setShowEpisodeCarousel(false);
+            setShowServerMenu(false);
+          }}
+        />
+      )}
 
       {/* ── Floating Episode Horizontal Carousel ── */}
       {showEpisodeCarousel && seasons && seasons.length > 0 && (
-        <div className="fixed top-20 inset-x-0 z-50 mx-2 sm:mx-8 p-4 sm:p-5 rounded-3xl bg-[#18181b]/95 border border-white/10 backdrop-blur-2xl shadow-[0_20px_50px_rgba(0,0,0,0.9)] animate-fade-in space-y-3 max-h-[calc(100dvh-6rem)] overflow-y-auto">
+        <div className="fixed top-16 sm:top-18 inset-x-0 z-50 mx-2 sm:mx-8 p-4 sm:p-5 rounded-3xl bg-[#18181b]/95 border border-white/10 backdrop-blur-2xl shadow-[0_20px_50px_rgba(0,0,0,0.9)] animate-fade-in space-y-3 max-h-[calc(100dvh-5rem)] overflow-y-auto">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 flex-wrap">
               {seasons.length > 1 ? (
@@ -594,20 +697,49 @@ export function CinemaPlayer({
 
               {/* Episode Range Selector for Long Shows / Anime (e.g. 1-25, 26-50, 951-1000) */}
               {episodeRanges.length > 0 && (
-                <div className="flex items-center gap-1.5 overflow-x-auto max-w-sm sm:max-w-md hide-scrollbar py-0.5">
-                  {episodeRanges.map((r) => (
-                    <button
-                      key={r.label}
-                      onClick={() => setActiveEpisodeRange(r.label)}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-black shrink-0 transition-all cursor-pointer ${
-                        activeEpisodeRange === r.label
-                          ? "bg-primary text-primary-foreground shadow"
-                          : "bg-white/5 text-white/50 hover:text-white hover:bg-white/10"
-                      }`}
-                    >
-                      {r.label}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => scrollRange("left")}
+                    disabled={!canScrollRangeLeft}
+                    className={`p-1 rounded-full transition-all flex items-center justify-center shrink-0 ${
+                      canScrollRangeLeft ? "bg-white/10 hover:bg-white/20 text-white cursor-pointer" : "text-white/30 cursor-not-allowed"
+                    }`}
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+
+                  <div 
+                    ref={rangeScrollRef}
+                    className="flex items-center gap-1.5 overflow-x-auto max-w-sm sm:max-w-md hide-scrollbar scroll-smooth py-0.5"
+                  >
+                    {episodeRanges.map((r) => {
+                      const isActive = activeEpisodeRange === r.label;
+                      return (
+                        <button
+                          key={r.label}
+                          data-active={isActive ? "true" : "false"}
+                          onClick={() => setActiveEpisodeRange(r.label)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-black shrink-0 transition-all cursor-pointer ${
+                            isActive
+                              ? "bg-primary text-primary-foreground shadow"
+                              : "bg-white/5 text-white/50 hover:text-white hover:bg-white/10"
+                          }`}
+                        >
+                          {r.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    onClick={() => scrollRange("right")}
+                    disabled={!canScrollRangeRight}
+                    className={`p-1 rounded-full transition-all flex items-center justify-center shrink-0 ${
+                      canScrollRangeRight ? "bg-white/10 hover:bg-white/20 text-white cursor-pointer" : "text-white/30 cursor-not-allowed"
+                    }`}
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               )}
             </div>
@@ -802,7 +934,7 @@ export function CinemaPlayer({
 
       {/* ── Floating Server Selection Popup ── */}
       {showServerMenu && (
-        <div className="fixed top-20 right-3 sm:right-8 z-50 w-72 sm:w-80 max-h-[calc(100dvh-6rem)] overflow-y-auto bg-[#18181b]/95 border border-white/15 rounded-2xl p-4 shadow-[0_25px_60px_rgba(0,0,0,0.95)] backdrop-blur-2xl animate-fade-in space-y-3">
+        <div className="fixed top-16 sm:top-18 right-3 sm:right-8 z-50 w-72 sm:w-80 max-h-[calc(100dvh-5rem)] overflow-y-auto bg-[#18181b]/95 border border-white/15 rounded-2xl p-4 shadow-[0_25px_60px_rgba(0,0,0,0.95)] backdrop-blur-2xl animate-fade-in space-y-3">
           <div className="flex items-center justify-between pb-2 border-b border-white/10">
             <div className="flex items-center gap-2">
               <Server className="w-3.5 h-3.5 text-primary" />
@@ -877,151 +1009,6 @@ export function CinemaPlayer({
           </div>
         </div>
       )}
-
-      {/* ── Bottom Cinema Control Bar (ONLY rendered for native HLS player so no duplicate scrubbers on iframes) ── */}
-      {playerMode === "native" && !isAnime && (
-        <div
-          className={`relative z-30 w-full px-6 pb-6 pt-10 bg-gradient-to-t from-black via-black/70 to-transparent transition-opacity duration-300 ${
-            showControls ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-          }`}
-        >
-          {/* Timeline Scrubber Line */}
-          <div className="w-full h-1 bg-white/20 hover:h-1.5 rounded-full relative mb-4 cursor-pointer transition-all">
-            <div
-              className="h-full bg-emerald-400 rounded-full"
-              style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
-            />
-          </div>
-
-          {/* Controls Row */}
-          <div className="flex items-center justify-between">
-            {/* Left Controls: Play, Rewind 10, FastForward 10, Volume, Time */}
-            <div className="flex items-center gap-4 sm:gap-5">
-              <button
-                onClick={() => setIsPlaying(!isPlaying)}
-                className="text-white hover:scale-110 transition-transform cursor-pointer"
-                title={isPlaying ? "Pause" : "Play"}
-              >
-                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current" />}
-              </button>
-
-              <button
-                onClick={() => {}}
-                className="text-white/80 hover:text-white transition-colors cursor-pointer"
-                title="Rewind 10s"
-              >
-                <RotateCcw className="w-5 h-5" />
-              </button>
-
-              <button
-                onClick={() => {}}
-                className="text-white/80 hover:text-white transition-colors cursor-pointer"
-                title="Forward 10s"
-              >
-                <FastForward className="w-5 h-5" />
-              </button>
-
-              <button
-                onClick={() => setIsMuted(!isMuted)}
-                className="text-white/80 hover:text-white transition-colors cursor-pointer"
-                title={isMuted ? "Unmute" : "Mute"}
-              >
-                {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-              </button>
-
-              <span className="text-xs font-semibold text-white/70 tracking-wide">
-                {formatTime(currentTime)} / {formatTime(duration || 3217)}
-              </span>
-            </div>
-
-            {/* Right Controls: [Episodes] [Theater] [Servers] [Subtitles] [Settings] [Fullscreen] */}
-            <div className="flex items-center gap-3 sm:gap-4">
-              {/* Episodes Drawer Icon (Screenshot 2) */}
-              {seasons && seasons.length > 0 && (
-                <button
-                  onClick={() => {
-                    setShowEpisodeCarousel(!showEpisodeCarousel);
-                    setShowServerMenu(false);
-                  }}
-                  className={`p-1 text-white transition-colors cursor-pointer ${
-                    showEpisodeCarousel ? "text-primary" : "text-white/80 hover:text-white"
-                  }`}
-                  title="Episode List"
-                >
-                  <Layers className="w-5 h-5" />
-                </button>
-              )}
-
-              {/* Screen / Theater Mode Icon */}
-              <button
-                onClick={() => setIsTheaterMode(!isTheaterMode)}
-                className={`p-1 text-white transition-colors cursor-pointer ${
-                  isTheaterMode ? "text-primary" : "text-white/80 hover:text-white"
-                }`}
-                title="Screen Mode"
-              >
-                <Tv className="w-5 h-5" />
-              </button>
-
-              {/* Sources Cloud Icon */}
-              <button
-                onClick={() => {
-                  setShowServerMenu(!showServerMenu);
-                  setShowEpisodeCarousel(false);
-                }}
-                className={`p-1 text-white transition-colors cursor-pointer ${
-                  showServerMenu ? "text-primary" : "text-white/80 hover:text-white"
-                }`}
-                title="Sources"
-              >
-                <Cloud className="w-5 h-5" />
-              </button>
-
-              {/* Next Source Icon */}
-              {servers && servers.length > 1 && (
-                <button
-                  onClick={handleNextSource}
-                  className="p-1 text-white/80 hover:text-white transition-colors cursor-pointer active:scale-95"
-                  title="Next Source"
-                >
-                  <SkipForward className="w-5 h-5 text-primary" />
-                </button>
-              )}
-
-              {/* Reload Source Icon */}
-              <button
-                onClick={handleReloadSource}
-                disabled={isReloading}
-                className="p-1 text-white/80 hover:text-white transition-colors cursor-pointer active:scale-95 disabled:opacity-60"
-                title="Reload Current Source"
-              >
-                <RotateCcw className={`w-5 h-5 ${isReloading ? "animate-spin text-primary" : ""}`} />
-              </button>
-
-              {/* Settings Icon */}
-              <button
-                onClick={() => setShowSettingsModal(true)}
-                className="p-1 text-white/80 hover:text-white transition-colors cursor-pointer"
-                title="Settings"
-              >
-                <Settings className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Settings Modal */}
-      <PlayerSettingsModal
-        isOpen={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        playbackSpeed={playbackSpeed}
-        onSpeedChange={setPlaybackSpeed}
-        autoPlayNext={autoPlayNext}
-        onToggleAutoPlayNext={() => setAutoPlayNext(!autoPlayNext)}
-        autoSkipIntro={autoSkipIntro}
-        onToggleAutoSkipIntro={() => setAutoSkipIntro(!autoSkipIntro)}
-      />
     </div>
   );
 }

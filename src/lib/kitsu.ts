@@ -10,7 +10,6 @@ import {
   type SeasonInfo,
   type FranchiseNode
 } from "./anime-fetch";
-import { getCuratedAnimeFranchiseNodes } from "./franchises";
 import { searchTmdbShow } from "./tmdb";
 
 export const KITSU_BASE = "https://kitsu.io/api/edge";
@@ -428,17 +427,26 @@ export async function getAnimeDetailsViaKitsu(
 } | null> {
   const isKitsuInput = id.startsWith("kitsu-");
   const isMalInput = id.startsWith("mal-");
+  const isTmdbInput = id.startsWith("tmdb-");
   const rawCleanId = id.replace(/^(kitsu-|mal-|tmdb-)/, "");
   const numId = parseInt(rawCleanId, 10);
 
   let kitsuId: string | null = isKitsuInput ? rawCleanId : null;
   let aniZipMapping: any = null;
   let malId: string | null = isMalInput ? rawCleanId : null;
-  let anilistId: string | null = (!isKitsuInput && !isMalInput && !isNaN(numId)) ? String(numId) : null;
-  let tmdbId: number | null = null;
+  let anilistId: string | null = (!isKitsuInput && !isMalInput && !isTmdbInput && !isNaN(numId)) ? String(numId) : null;
+  let tmdbId: number | null = isTmdbInput && !isNaN(numId) ? numId : null;
 
   // Step 1: Query AniZip mappings to resolve cross-platform IDs (AniList, MAL, TMDB)
-  const queryParam = kitsuId ? `kitsu_id=${kitsuId}` : (isMalInput ? `mal_id=${numId}` : (!isNaN(numId) ? `anilist_id=${numId}` : null));
+  const queryParam = kitsuId
+    ? `kitsu_id=${kitsuId}`
+    : isMalInput
+    ? `mal_id=${numId}`
+    : isTmdbInput
+    ? `themoviedb_id=${numId}`
+    : !isNaN(numId)
+    ? `anilist_id=${numId}`
+    : null;
   if (queryParam) {
     try {
       const azRes = await fetch(`https://api.ani.zip/mappings?${queryParam}`, {
@@ -490,9 +498,30 @@ export async function getAnimeDetailsViaKitsu(
   if (!kitsuId) return null;
 
   // Step 4: Fetch Kitsu anime data with categories and relationships
-  const kitsuData = await kitsuFetchJson<any>(
+  let kitsuData = await kitsuFetchJson<any>(
     `${KITSU_BASE}/anime/${kitsuId}?include=categories,mediaRelationships.destination`
   );
+
+  // If direct lookup by kitsuId failed, check if numId is a TMDB, AniList, or MAL ID
+  if ((!kitsuData || !kitsuData.data) && !isNaN(numId) && numId > 0) {
+    try {
+      const azParam = `themoviedb_id=${numId}`;
+      const azRes = await fetch(`https://api.ani.zip/mappings?${azParam}`, {
+        signal: AbortSignal.timeout(3000),
+        headers: { "User-Agent": DEFAULT_FETCH_USER_AGENT },
+      });
+      if (azRes.ok) {
+        aniZipMapping = await azRes.json();
+        if (aniZipMapping?.mappings?.kitsu_id) {
+          kitsuId = String(aniZipMapping.mappings.kitsu_id);
+          kitsuData = await kitsuFetchJson<any>(
+            `${KITSU_BASE}/anime/${kitsuId}?include=categories,mediaRelationships.destination`
+          );
+        }
+      }
+    } catch {}
+  }
+
   if (!kitsuData || !kitsuData.data) return null;
 
   const attr = kitsuData.data.attributes || {};
@@ -616,18 +645,11 @@ export async function getAnimeDetailsViaKitsu(
     }
   }
 
-  // Prefer curated franchise nodes if this is a known curated series
-  const numCheckId = anilistId ? parseInt(anilistId, 10) : numId;
-  const curatedNodes = !isNaN(numCheckId) ? getCuratedAnimeFranchiseNodes(numCheckId) : null;
   let franchiseNodes: FranchiseNode[] = [];
   let seasonsList: SeasonInfo[] = [];
 
-  if (curatedNodes && curatedNodes.length > 1) {
-    franchiseNodes = curatedNodes as FranchiseNode[];
-    seasonsList = buildSeasonList(franchiseNodes, numCheckId);
-  } else {
-    // Build franchise nodes from Kitsu relations
-    const rawNodes: FranchiseNode[] = [
+  // Build franchise nodes from Kitsu relations and dynamic franchise discovery
+  const rawNodes: FranchiseNode[] = [
       {
         id: anilistId ? parseInt(anilistId, 10) : parseInt(kitsuId, 10),
         idMal: malId ? parseInt(malId, 10) : null,
@@ -704,6 +726,21 @@ export async function getAnimeDetailsViaKitsu(
       rawNodes.push(n);
     }
 
+    // Discover the complete franchise chain via base title search (all seasons, movies, OVAs)
+    try {
+      const discovered = await discoverFranchiseNodesViaKitsu(animeItem.name, kitsuId);
+      for (const d of discovered) {
+        const already = rawNodes.some(r =>
+          String(r.id) === String(d.id) ||
+          (r.idMal && d.idMal && r.idMal === d.idMal) ||
+          (r.title && d.title && r.title.toLowerCase() === d.title.toLowerCase())
+        );
+        if (!already) {
+          rawNodes.push(d);
+        }
+      }
+    } catch {}
+
     rawNodes.sort((a, b) => {
       const yearA = a.seasonYear || 9999;
       const yearB = b.seasonYear || 9999;
@@ -739,7 +776,6 @@ export async function getAnimeDetailsViaKitsu(
       };
       seasonsList = [singleSeason];
     }
-  }
 
   let knownAniZipTotal: number | null = null;
   if (aniZipMapping?.episodes) {
@@ -962,4 +998,119 @@ export async function fetchKitsuClientAnime(
     console.warn("[Kitsu Client Fallback Error]:", e);
     return { items: [], hasMore: false };
   }
+}
+
+export function extractFranchiseKeywords(title: string): string {
+  let clean = (title || "")
+    .replace(/\s*[:\-\–\—]?\s*((\d+(st|nd|rd|th)?\s+)?(season|part|cour|arc|chapter|series)|\d+(st|nd|rd|th)|the\s+final|final\s+season|the\s+movie|movie\s+\d+|\(movie\)|\(tv\)|\(ova\)|\(special\)|hashira\s+training|thousand-year\s+blood\s+war|war\s+of\s+underworld|alicization|stone\s+ocean|\bIV\b|\bIII\b|\bII\b|\b\d+\b).*/i, "")
+    .replace(/^(the|a|an)\s+/i, "")
+    .trim();
+
+  // If title starts with Re: (e.g. Re:Zero, Re:Creators), keep the full Re:Word
+  if (clean.toLowerCase().startsWith("re:")) {
+    const parts = clean.split(/[-–—]/);
+    clean = parts[0].trim();
+  } else if (clean.includes(":")) {
+    const prefix = clean.split(":")[0].trim();
+    if (prefix.length >= 3) clean = prefix;
+  }
+  if (clean.includes(" - ")) {
+    const prefix = clean.split(" - ")[0].trim();
+    if (prefix.length >= 3) clean = prefix;
+  }
+  return clean.trim();
+}
+
+export async function discoverFranchiseNodesViaKitsu(title: string, currentKitsuId?: string): Promise<FranchiseNode[]> {
+  const keyword = extractFranchiseKeywords(title);
+  if (!keyword || keyword.length < 2) return [];
+
+  // Punctuation like colons/hyphens can break Kitsu's search filter, replace with spaces
+  const searchWord = keyword.replace(/[:\-_]/g, " ").replace(/\s+/g, " ").trim();
+  const url = `${KITSU_BASE}/anime?filter[text]=${encodeURIComponent(searchWord)}&page[limit]=20&sort=-userCount`;
+  const res = await kitsuFetchJson<any>(url);
+  if (!res?.data || !Array.isArray(res.data) || res.data.length === 0) return [];
+
+  const keywordLower = keyword.toLowerCase();
+  const currentYear = new Date().getFullYear();
+
+  const matched = res.data.filter((item: any) => {
+    const attr = item.attributes || {};
+    const subtype = (attr.subtype || "").toUpperCase();
+
+    // 1. Never include music videos / character songs in franchise seasons
+    if (subtype === "MUSIC") return false;
+
+    // 2. Filter out unreleased placeholder seasons with 0 episodes from future years
+    let year: number | null = null;
+    if (attr.startDate) {
+      const d = new Date(attr.startDate);
+      if (!isNaN(d.getTime())) year = d.getFullYear();
+    }
+    const eps = attr.episodeCount;
+    if ((attr.status === "unreleased" || attr.status === "tba" || (year && year > currentYear)) && (!eps || eps === 0)) {
+      return false;
+    }
+
+    // 3. Strict Title Anchor Matching — candidate MUST contain the franchise anchor keyword
+    const titles = [
+      attr.canonicalTitle,
+      attr.titles?.en,
+      attr.titles?.en_jp,
+      attr.titles?.ja_jp
+    ].filter(Boolean).map((t: string) => t.toLowerCase());
+
+    return titles.some((t: string) => t.includes(keywordLower));
+  });
+
+  if (matched.length === 0) return [];
+
+  const nodes: FranchiseNode[] = await Promise.all(matched.map(async (m: any) => {
+    const attr = m.attributes || {};
+    const subtype = (attr.subtype || "TV").toUpperCase();
+    const isMovie = subtype === "MOVIE";
+    const kId = String(m.id);
+
+    let anilistId: number | null = null;
+    let malId: number | null = null;
+    try {
+      const az = await fetch(`https://api.ani.zip/mappings?kitsu_id=${kId}`, {
+        signal: AbortSignal.timeout(4000),
+        headers: { "User-Agent": DEFAULT_FETCH_USER_AGENT },
+        next: { revalidate: 86400 } as any,
+      });
+      if (az.ok) {
+        const azData = await az.json();
+        if (azData?.mappings?.anilist_id) anilistId = parseInt(String(azData.mappings.anilist_id), 10);
+        if (azData?.mappings?.mal_id) malId = parseInt(String(azData.mappings.mal_id), 10);
+      }
+    } catch {}
+
+    const year = attr.startDate ? new Date(attr.startDate).getFullYear() : null;
+    let status = "FINISHED";
+    if (attr.status === "current") status = "RELEASING";
+    else if (attr.status === "upcoming" || attr.status === "unreleased") status = "NOT_YET_RELEASED";
+
+    return {
+      id: anilistId ? anilistId : (`kitsu-${kId}` as any),
+      idMal: malId,
+      title: attr.titles?.en || attr.canonicalTitle || attr.titles?.en_jp || "Related",
+      episodes: isMovie ? 1 : (attr.episodeCount || null),
+      seasonYear: year,
+      status,
+      format: subtype,
+      duration: attr.episodeLength || null,
+      coverImage: attr.posterImage?.large || attr.posterImage?.original || null,
+      bannerImage: attr.coverImage?.large || attr.coverImage?.original || null,
+    };
+  }));
+
+  const formatOrder: Record<string, number> = { TV: 0, TV_SHORT: 1, ONA: 2, OVA: 3, SPECIAL: 4, MOVIE: 5 };
+  nodes.sort((a, b) => {
+    const yA = a.seasonYear || 9999, yB = b.seasonYear || 9999;
+    if (yA !== yB) return yA - yB;
+    return (formatOrder[a.format || "TV"] ?? 6) - (formatOrder[b.format || "TV"] ?? 6);
+  });
+
+  return nodes;
 }

@@ -326,6 +326,7 @@ export const NativeHlsPlayer = memo(function NativeHlsPlayer({
     }
   }, [externalIsPlaying]);
 
+
   // ── Time & Progress Updates ──
   const handleTimeUpdate = useCallback(() => {
     if (!videoRef.current) return;
@@ -386,15 +387,15 @@ export const NativeHlsPlayer = memo(function NativeHlsPlayer({
     const effectiveIframeUrl = liveIframeUrl || fallbackIframeUrl;
 
     return (
-      <div className="w-full h-full relative bg-black flex items-center justify-center overflow-hidden select-none">
+      <div className="w-full h-full relative bg-black flex items-center justify-center overflow-hidden">
         {effectiveIframeUrl ? (
           <iframe
             key={effectiveIframeUrl}
             src={effectiveIframeUrl}
-            className="w-full h-full border-0 block"
+            className="w-full h-full border-0 block pointer-events-auto"
             style={{ width: "100%", height: "100%", border: 0 }}
             scrolling="no"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen *"
             allowFullScreen
             referrerPolicy="no-referrer-when-downgrade"
             title={title || "Video Stream"}
@@ -424,6 +425,7 @@ export const NativeHlsPlayer = memo(function NativeHlsPlayer({
     <div className="w-full h-full relative bg-black select-none overflow-hidden flex items-center justify-center">
       <video
         ref={videoRef}
+        controls
         poster={poster}
         playsInline
         crossOrigin="anonymous"

@@ -262,10 +262,10 @@ async function getEnrichedEpisodesList(
       fetchFillerLookupFromAnimeFillerList(cleanSeasonName),
       new Promise<null>(r => setTimeout(() => r(null), 1000)),
     ]);
-    if (fillerLookup && (fillerLookup.filler.size > 0 || fillerLookup.mixed.size > 0)) {
+    if (fillerLookup && fillerLookup.filler.size > 0) {
       seasonEps = seasonEps.map((ep) => ({
         ...ep,
-        isFiller: ep.isFiller || fillerLookup.filler.has(ep.episodeNum) || fillerLookup.mixed.has(ep.episodeNum),
+        isFiller: Boolean(ep.isFiller || fillerLookup.filler.has(ep.episodeNum)),
       }));
     }
   } catch {}
@@ -352,13 +352,21 @@ export async function GET(
       const tmdbSeasonParam = searchParams.get("tmdbSeason");
       const episodeOffsetParam = searchParams.get("episodeOffset");
 
-      const clientTmdbId = tmdbIdParam != null ? parseInt(tmdbIdParam, 10) : null;
-      const clientTmdbSeasonNum = tmdbSeasonParam != null ? parseInt(tmdbSeasonParam, 10) : null;
-      const clientEpisodeOffset = episodeOffsetParam != null ? parseInt(episodeOffsetParam, 10) : null;
+      let clientTmdbId = tmdbIdParam != null ? parseInt(tmdbIdParam, 10) : null;
+      let clientTmdbSeasonNum = tmdbSeasonParam != null ? parseInt(tmdbSeasonParam, 10) : null;
+      let clientEpisodeOffset = episodeOffsetParam != null ? parseInt(episodeOffsetParam, 10) : 0;
+
+      const tmdbPattern = String(seasonId || id).match(/^tmdb-(\d+)(?:-s(\d+))?$/i);
+      if (tmdbPattern) {
+        if (!clientTmdbId) clientTmdbId = parseInt(tmdbPattern[1], 10);
+        if (!clientTmdbSeasonNum && tmdbPattern[2]) clientTmdbSeasonNum = parseInt(tmdbPattern[2], 10);
+      }
+      if (!clientTmdbSeasonNum && !isNaN(seasonNumParam) && seasonNumParam > 0) {
+        clientTmdbSeasonNum = seasonNumParam;
+      }
 
       const allParamsProvided = clientTmdbId != null && !isNaN(clientTmdbId) &&
-                                clientTmdbSeasonNum != null && !isNaN(clientTmdbSeasonNum) &&
-                                clientEpisodeOffset != null && !isNaN(clientEpisodeOffset);
+                                clientTmdbSeasonNum != null && !isNaN(clientTmdbSeasonNum);
 
       if (allParamsProvided) {
         meta = await getAnimeDetails(seasonId, 1500, true).catch(() => null);
@@ -476,10 +484,20 @@ export async function GET(
       const safeTotalEpisodes = isMovieOrSpecial ? 1 : (season.totalEpisodes && season.totalEpisodes < 1499 && season.totalEpisodes > 0 ? season.totalEpisodes : 1500);
 
       if (isTMDBReady && !isMovieOrSpecial) {
+        const primarySeasonNum = tmdbSeasonNum || 1;
         const tmdbShowPromise = tmdbFetch(`/tv/${tmdbId}`).catch(() => null);
-        const overlayEpsPromise = getEnrichedEpisodesList(season.id, season.name, safeTotalEpisodes);
+        const primaryEpisodesPromise = fetchTmdbEpisodeData(tmdbId, [primarySeasonNum]).catch(() => new Map<string, any>());
+        const overlayEpsPromise = Promise.race([
+          getEnrichedEpisodesList(season.id, season.name, safeTotalEpisodes),
+          new Promise<any[]>((r) => setTimeout(() => r([]), 3500)),
+        ]);
 
-        const showData = await tmdbShowPromise;
+        const [showData, primaryEpisodes, overlayEps] = await Promise.all([
+          tmdbShowPromise,
+          primaryEpisodesPromise,
+          overlayEpsPromise,
+        ]);
+
         let tmdbSeasonsList: TmdbSeasonMin[] = [];
         if ((showData as any)?.seasons) {
           tmdbSeasonsList = (showData as any).seasons
@@ -487,40 +505,32 @@ export async function GET(
             .sort((a: any, b: any) => a.season_number - b.season_number);
         }
 
-        let dynamicTotalEpisodes = isMovieOrSpecial ? 1 : safeTotalEpisodes;
-        const knownEpisodeCount = season.totalEpisodes && season.totalEpisodes < 1499 ? season.totalEpisodes : null;
-        if (tmdbSeasonsList.length > 0) {
-          const currentTmdbSeason = tmdbSeasonsList.find((s: any) => s.season_number === (tmdbSeasonNum || 1));
-          const nextSeasonInTMDB = (meta?.seasons || []).find((s: any) =>
-            s.tmdbSeasonNumber === (tmdbSeasonNum || 1) &&
-            (s.episodeOffset || 0) > episodeOffset &&
-            s.totalEpisodes > 2
-          );
+        const currentTmdbSeason = tmdbSeasonsList.find((s: any) => s.season_number === primarySeasonNum);
+        const seasonEpisodeCount = currentTmdbSeason?.episode_count || 0;
+        const knownEpisodeCount = season.totalEpisodes && season.totalEpisodes < 1499 && season.totalEpisodes > 0 ? season.totalEpisodes : null;
 
-          const currentTmdbSeasonEpCount = currentTmdbSeason ? Math.max((currentTmdbSeason.episode_count || 0) - episodeOffset, 0) : 0;
-          if (currentTmdbSeasonEpCount > 0) {
-            dynamicTotalEpisodes = Math.max(knownEpisodeCount || 0, currentTmdbSeasonEpCount);
-          } else if (knownEpisodeCount) {
-            dynamicTotalEpisodes = knownEpisodeCount;
-          } else if (nextSeasonInTMDB) {
-            dynamicTotalEpisodes = (nextSeasonInTMDB.episodeOffset || 0) - episodeOffset;
-          }
-          dynamicTotalEpisodes = Math.min(Math.max(dynamicTotalEpisodes, 1), 1500);
-        }
+        let dynamicTotalEpisodes = seasonEpisodeCount > 0
+          ? Math.max(knownEpisodeCount || 0, seasonEpisodeCount)
+          : (knownEpisodeCount || 24);
 
+        const tmdbEpisodes = primaryEpisodes;
+
+        // If split-cour offset spans beyond primary season, fetch any secondary season
         const neededSeasons = new Set<number>();
-        const startSeason = tmdbSeasonNum || 1;
-        for (let i = 1; i <= dynamicTotalEpisodes; i++) {
-          const mapped = mapRelativeToTmdb(episodeOffset + i, startSeason, tmdbSeasonsList);
-          neededSeasons.add(mapped.seasonNumber);
+        for (let i = 1; i <= Math.min(dynamicTotalEpisodes, 1500); i++) {
+          const mapped = mapRelativeToTmdb(episodeOffset + i, primarySeasonNum, tmdbSeasonsList);
+          if (mapped.seasonNumber !== primarySeasonNum) {
+            neededSeasons.add(mapped.seasonNumber);
+          }
         }
-
-        const seasonNumbers = Array.from(neededSeasons);
-        const tmdbEpisodesPromise = seasonNumbers.length > 0
-          ? fetchTmdbEpisodeData(tmdbId, seasonNumbers)
-          : Promise.resolve(new Map<string, any>());
-
-        const [overlayEps, tmdbEpisodes] = await Promise.all([overlayEpsPromise, tmdbEpisodesPromise]);
+        if (neededSeasons.size > 0) {
+          try {
+            const extraEpisodes = await fetchTmdbEpisodeData(tmdbId, Array.from(neededSeasons));
+            for (const [k, v] of extraEpisodes.entries()) {
+              tmdbEpisodes.set(k, v);
+            }
+          } catch {}
+        }
 
         if (tmdbEpisodes.size === 0 && overlayEps.length > 0) {
           seasonEps = overlayEps.map((ep) => ({
@@ -539,7 +549,7 @@ export async function GET(
         } else if (tmdbEpisodes.size > 0) {
           for (let i = 1; i <= dynamicTotalEpisodes; i++) {
             const matchEp = overlayEps.find(j => j.episodeNum === i);
-            const mapped = mapRelativeToTmdb(episodeOffset + i, startSeason, tmdbSeasonsList);
+            const mapped = mapRelativeToTmdb(episodeOffset + i, primarySeasonNum, tmdbSeasonsList);
             const tmdbSeason = mapped.seasonNumber;
             const tmdbEpisode = mapped.episodeNumber;
 
