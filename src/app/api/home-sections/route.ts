@@ -37,7 +37,19 @@ export async function GET() {
       title: s.title,
       subtitle: s.subtitle,
       icon: s.icon,
-      items: Array.isArray(s.items) ? s.items : [],
+      items: (Array.isArray(s.items) ? s.items : []).map((it: any) => {
+        const isAnime = it.media_type === "anime" || it.isTmdbAnime || Boolean(it.anilistId) || String(it.targetUrl || it.target_url || "").includes("/anime/");
+        if (isAnime) {
+          const animeId = it.anilistId || it.id;
+          return {
+            ...it,
+            media_type: "anime",
+            targetUrl: `/anime/${animeId}`,
+            target_url: `/anime/${animeId}`,
+          };
+        }
+        return it;
+      }),
     }));
 
     setCachedHomeSections(mapped);

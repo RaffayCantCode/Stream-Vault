@@ -41,10 +41,9 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const [override, data, allOverrides] = await Promise.all([
+    const [override, data] = await Promise.all([
       getMediaOverride("anime", id).catch(() => null),
       getAnimeDetails(id, 1500, true),
-      getAllMediaOverrides().catch(() => []),
     ]);
 
     if (override?.isHidden || override?.status === "hidden") {
@@ -87,6 +86,7 @@ export async function GET(
     const { anime, totalEpisodes, seasons, openedSeasonId, franchiseNodes, tmdbId, tmdbSeasonMap } = data;
 
     // Apply season-level overrides strictly for anime overrides (prevent movie/tv overrides matching plain numeric IDs)
+    const allOverrides = override ? [override] : [];
     const overrideMap = new Map<string, any>();
     for (const o of allOverrides) {
       const cleanType = (o.mediaType || "").toLowerCase().trim();

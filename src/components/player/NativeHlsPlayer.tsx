@@ -326,6 +326,44 @@ export const NativeHlsPlayer = memo(function NativeHlsPlayer({
     }
   }, [externalIsPlaying]);
 
+  // ── Sync Native Video Controls Fullscreen with Cinema Container ──
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const getTargetContainer = () => {
+      return (
+        video.closest('[data-cinema-player="true"]') ||
+        video.closest('.fixed.inset-0') ||
+        document.documentElement
+      ) as HTMLElement;
+    };
+
+    const originalRequestFullscreen = video.requestFullscreen?.bind(video);
+    const customFullscreen = function (this: HTMLVideoElement, options?: FullscreenOptions) {
+      const target = getTargetContainer();
+      if (target.requestFullscreen) return target.requestFullscreen(options);
+      if ((target as any).webkitRequestFullscreen) return (target as any).webkitRequestFullscreen();
+      if ((target as any).mozRequestFullScreen) return (target as any).mozRequestFullScreen();
+      if ((target as any).msRequestFullscreen) return (target as any).msRequestFullscreen();
+      return originalRequestFullscreen ? originalRequestFullscreen(options) : Promise.resolve();
+    };
+
+    try {
+      video.requestFullscreen = customFullscreen;
+      (video as any).webkitRequestFullscreen = customFullscreen;
+      (video as any).mozRequestFullScreen = customFullscreen;
+      (video as any).msRequestFullscreen = customFullscreen;
+    } catch {}
+
+    return () => {
+      if (originalRequestFullscreen) {
+        try {
+          video.requestFullscreen = originalRequestFullscreen;
+        } catch {}
+      }
+    };
+  }, [useIframeFallback, streamUrl]);
 
   // ── Time & Progress Updates ──
   const handleTimeUpdate = useCallback(() => {
@@ -387,18 +425,41 @@ export const NativeHlsPlayer = memo(function NativeHlsPlayer({
     const effectiveIframeUrl = liveIframeUrl || fallbackIframeUrl;
 
     return (
-      <div className="w-full h-full relative bg-black flex items-center justify-center overflow-hidden">
+      <div
+        className="absolute inset-0 w-full h-full bg-black flex items-center justify-center overflow-hidden"
+        style={{ width: "100%", height: "100%" }}
+      >
         {effectiveIframeUrl ? (
           <iframe
             key={effectiveIframeUrl}
             src={effectiveIframeUrl}
             className="w-full h-full border-0 block pointer-events-auto"
-            style={{ width: "100%", height: "100%", border: 0 }}
-            scrolling="no"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen *"
-            allowFullScreen
+            style={{ width: "100%", height: "100%", minWidth: "100%", minHeight: "100%", border: 0 }}
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
             referrerPolicy="no-referrer-when-downgrade"
             title={title || "Video Stream"}
+            onLoad={(e) => {
+              const iframe = e.currentTarget;
+              if (iframe?.contentWindow) {
+                const doc = typeof document !== "undefined" ? (document as any) : {};
+                const isFull = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+                const sendSync = () => {
+                  try {
+                    iframe.contentWindow?.postMessage({ megaFullscreenState: isFull }, "*");
+                    iframe.contentWindow?.postMessage(JSON.stringify({ megaFullscreenState: isFull }), "*");
+                    iframe.contentWindow?.postMessage({ command: isFull ? "enterFullscreen" : "exitFullscreen" }, "*");
+                    iframe.contentWindow?.postMessage(JSON.stringify({ command: isFull ? "enterFullscreen" : "exitFullscreen" }), "*");
+                    iframe.contentWindow?.postMessage({ type: isFull ? "enterFullscreen" : "exitFullscreen" }, "*");
+                    iframe.contentWindow?.postMessage({ event: isFull ? "fullscreen_on" : "fullscreen_off" }, "*");
+                  } catch {}
+                };
+                sendSync();
+                setTimeout(sendSync, 300);
+                setTimeout(sendSync, 1000);
+                setTimeout(sendSync, 2500);
+                setTimeout(sendSync, 5000);
+              }
+            }}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center bg-black">

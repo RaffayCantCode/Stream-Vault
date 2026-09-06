@@ -19,6 +19,8 @@ import {
   Server,
   SkipForward,
   Lock,
+  Menu,
+  ChevronUp,
 } from "lucide-react";
 import { isEpisodeUpcoming } from "@/lib/episode-availability";
 import { ServerOption } from "./ServerSelectorModal";
@@ -80,6 +82,27 @@ export function CinemaPlayer({
   const [showEpisodeCarousel, setShowEpisodeCarousel] = useState(false);
   const [showServerMenu, setShowServerMenu] = useState(false);
   const [playerMode, setPlayerMode] = useState<"native" | "iframe">(isAnime ? "iframe" : "native");
+  const [showTopBar, setShowTopBar] = useState(true);
+  const [showDropdownMenu, setShowDropdownMenu] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!showDropdownMenu) return;
+    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        const target = e.target as HTMLElement;
+        if (target?.closest?.('[data-menu-toggle]')) return;
+        setShowDropdownMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("touchstart", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
+    };
+  }, [showDropdownMenu]);
 
   // Reload Source state
   const [reloadKey, setReloadKey] = useState(0);
@@ -159,48 +182,204 @@ export function CinemaPlayer({
     }
   }, []);
 
+  const handleToggleTopBar = useCallback(() => {
+    setShowTopBar((prev) => {
+      if (prev) {
+        setShowEpisodeCarousel(false);
+        setShowServerMenu(false);
+      }
+      return !prev;
+    });
+  }, []);
+
+  const handleMenuButtonClick = useCallback(() => {
+    // On desktop / tablet (>= 640px), pressing the menu button shows the top bar fully again
+    if (typeof window !== "undefined" && window.innerWidth >= 640) {
+      setShowTopBar(true);
+      setShowDropdownMenu(false);
+    } else {
+      // On mobile (< 640px), toggle controls dropdown
+      setShowDropdownMenu((prev) => !prev);
+    }
+  }, []);
+
+  const broadcastFullscreenState = useCallback((state?: boolean) => {
+    const doc = document as any;
+    const isFull = state !== undefined ? state : Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+    if (containerRef.current) {
+      const iframes = containerRef.current.querySelectorAll("iframe");
+      iframes.forEach((iframe) => {
+        try {
+          if (iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ megaFullscreenState: isFull }, "*");
+            iframe.contentWindow.postMessage(JSON.stringify({ megaFullscreenState: isFull }), "*");
+            iframe.contentWindow.postMessage({ command: isFull ? "enterFullscreen" : "exitFullscreen" }, "*");
+            iframe.contentWindow.postMessage(JSON.stringify({ command: isFull ? "enterFullscreen" : "exitFullscreen" }), "*");
+            iframe.contentWindow.postMessage({ type: isFull ? "enterFullscreen" : "exitFullscreen" }, "*");
+            iframe.contentWindow.postMessage({ event: isFull ? "fullscreen_on" : "fullscreen_off" }, "*");
+          }
+        } catch {}
+      });
+    }
+  }, []);
+
+  // Periodically handshake with iframes so embedded players bind to parent fullscreen
+  useEffect(() => {
+    broadcastFullscreenState();
+    const timers = [100, 300, 600, 1200, 2500, 5000, 8000].map((ms) =>
+      setTimeout(() => broadcastFullscreenState(), ms)
+    );
+    return () => {
+      timers.forEach(clearTimeout);
+    };
+  }, [broadcastFullscreenState, reloadKey]);
+
+  // Synchronize source player and site controls fullscreen:
+  // Intercept any fullscreen request from child video or iframe and redirect it to the cinema player container.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const patchMediaElement = (el: any) => {
+      if (!el || el.__cinemaFsPatched) return;
+      el.__cinemaFsPatched = true;
+
+      const originalRequestFullscreen = el.requestFullscreen?.bind(el);
+      const customRequestFullscreen = function (this: any, options?: FullscreenOptions) {
+        if (container.requestFullscreen) {
+          return container.requestFullscreen(options);
+        }
+        if ((container as any).webkitRequestFullscreen) {
+          return (container as any).webkitRequestFullscreen();
+        }
+        if ((container as any).mozRequestFullScreen) {
+          return (container as any).mozRequestFullScreen();
+        }
+        if ((container as any).msRequestFullscreen) {
+          return (container as any).msRequestFullscreen();
+        }
+        return originalRequestFullscreen ? originalRequestFullscreen(options) : Promise.resolve();
+      };
+
+      try {
+        el.requestFullscreen = customRequestFullscreen;
+        el.webkitRequestFullscreen = customRequestFullscreen;
+        el.mozRequestFullScreen = customRequestFullscreen;
+        el.msRequestFullscreen = customRequestFullscreen;
+      } catch {}
+    };
+
+    const patchAll = () => {
+      container.querySelectorAll("video").forEach(patchMediaElement);
+      container.querySelectorAll("iframe").forEach(patchMediaElement);
+    };
+
+    patchAll();
+    const observer = new MutationObserver(() => {
+      patchAll();
+    });
+    observer.observe(container, { childList: true, subtree: true });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
   useEffect(() => {
     const handleFullscreenChange = () => {
       const doc = document as any;
-      const isFull = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+      const fsElement = doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement;
+      const isFull = Boolean(fsElement);
       setIsFullscreen(isFull);
-      if (containerRef.current) {
-        const iframes = containerRef.current.querySelectorAll('iframe');
-        iframes.forEach((iframe) => {
-          if (iframe.contentWindow) {
-            iframe.contentWindow.postMessage({ megaFullscreenState: isFull }, "*");
-          }
-        });
+
+      // If an iframe or child video entered native fullscreen on its own,
+      // re-target/promote fullscreen to containerRef.current immediately!
+      // This ensures Cine-Stream's top bar and menu button stay rendered on top.
+      if (isFull && fsElement && fsElement !== containerRef.current && containerRef.current) {
+        const retargetToContainer = () => {
+          try {
+            const container = containerRef.current;
+            if (!container) return;
+            const req =
+              container.requestFullscreen ||
+              (container as any).webkitRequestFullscreen ||
+              (container as any).mozRequestFullScreen ||
+              (container as any).msRequestFullscreen;
+            if (req) {
+              const p = req.call(container);
+              if (p && typeof p.catch === "function") {
+                p.catch(() => {});
+              }
+            }
+          } catch {}
+        };
+
+        retargetToContainer();
+        requestAnimationFrame(retargetToContainer);
+        setTimeout(retargetToContainer, 50);
       }
+
+      // Note: Do NOT auto-hide showTopBar on fullscreen! Top bar stays visible so site controls are always accessible.
+      broadcastFullscreenState(isFull);
     };
 
     const handleMessage = (e: MessageEvent) => {
       if (!e.data) return;
       const doc = document as any;
-      const { megaCommand, command } = e.data;
-      if (megaCommand === "toggleFullscreen" || command === "toggleFullscreen" || command === "requestFullscreen") {
-        toggleFullscreen();
-      } else if (megaCommand === "enterFullscreen" || command === "enterFullscreen") {
+      let data = e.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch {
+          data = { command: data };
+        }
+      }
+      if (!data || typeof data !== "object") return;
+
+      const cmd = (data.megaCommand || data.command || data.event || data.type || data.action || "").toString();
+
+      if (
+        cmd === "toggleFullscreen" ||
+        cmd === "toggle_fullscreen" ||
+        cmd === "fullscreen" ||
+        cmd === "requestFullscreen" ||
+        cmd === "request_fullscreen" ||
+        cmd === "enterFullscreen" ||
+        cmd === "enter_fullscreen"
+      ) {
         const el = (containerRef.current || document.documentElement) as any;
-        if (!doc.fullscreenElement && !doc.webkitFullscreenElement && !doc.mozFullScreenElement && !doc.msFullscreenElement) {
-          if (el.requestFullscreen) el.requestFullscreen();
+        const isFull = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+        if (!isFull || doc.fullscreenElement !== containerRef.current) {
+          if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
           else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
           else if (el.mozRequestFullScreen) el.mozRequestFullScreen();
           else if (el.msRequestFullscreen) el.msRequestFullscreen();
+        } else if (cmd === "toggleFullscreen" || cmd === "toggle_fullscreen") {
+          toggleFullscreen();
         }
-      } else if (megaCommand === "exitFullscreen" || command === "exitFullscreen") {
+      } else if (
+        cmd === "exitFullscreen" ||
+        cmd === "exit_fullscreen"
+      ) {
         if (doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement) {
-          if (doc.exitFullscreen) doc.exitFullscreen();
+          if (doc.exitFullscreen) doc.exitFullscreen().catch(() => {});
           else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
           else if (doc.mozCancelFullScreen) doc.mozCancelFullScreen();
           else if (doc.msExitFullscreen) doc.msExitFullscreen();
         }
-      } else if (megaCommand === "getFullscreenState") {
+      } else if (cmd === "getFullscreenState" || data.megaCommand === "getFullscreenState") {
+        const isFull = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
         if (e.source) {
-          (e.source as Window).postMessage(
-            { megaFullscreenState: Boolean(doc.fullscreenElement || doc.webkitFullscreenElement) },
-            { targetOrigin: "*" }
-          );
+          try {
+            (e.source as Window).postMessage(
+              { megaFullscreenState: isFull },
+              "*"
+            );
+            (e.source as Window).postMessage(
+              JSON.stringify({ megaFullscreenState: isFull }),
+              "*"
+            );
+          } catch {}
         }
       }
     };
@@ -213,6 +392,9 @@ export function CinemaPlayer({
       } else if (e.code === "Space") {
         e.preventDefault();
         handleTogglePlay();
+      } else if (e.key.toLowerCase() === "m" || e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        handleToggleTopBar();
       }
     };
 
@@ -231,7 +413,7 @@ export function CinemaPlayer({
       window.removeEventListener("message", handleMessage);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [toggleFullscreen, handleTogglePlay]);
+  }, [toggleFullscreen, handleTogglePlay, handleToggleTopBar]);
 
 
 
@@ -513,123 +695,19 @@ export function CinemaPlayer({
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 w-full h-[100dvh] max-w-full max-h-full bg-black select-none overflow-hidden flex flex-col z-50 font-sans overscroll-none"
-      style={ambientPalette.cssVars as React.CSSProperties}
+      data-cinema-player="true"
+      className="fixed inset-0 w-full h-full max-w-none max-h-none bg-black select-none overflow-hidden z-50 font-sans overscroll-none"
+      style={{
+        width: "100%",
+        height: "100%",
+        ...(ambientPalette.cssVars as React.CSSProperties),
+      }}
     >
-      {/* ── Top Bar: Single Site Control Layer ── */}
-      <header className="w-full h-14 sm:h-16 flex-shrink-0 z-40 px-3 sm:px-6 flex items-center justify-between bg-zinc-950/95 border-b border-white/10 backdrop-blur-md">
-        {/* Left: Back / Exit Button */}
-        <Link
-          href={metadata.backUrl}
-          className="flex items-center gap-2 px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-2xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs border border-white/15 backdrop-blur-md transition-all shadow-md cursor-pointer shrink-0 group"
-          title="Back to Details"
-        >
-          <ArrowLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
-          <span className="hidden sm:inline">Back</span>
-        </Link>
-
-        {/* Center: Title & Episode Subtitle & Source Badge */}
-        <div className="flex flex-col items-center text-center max-w-[34%] sm:max-w-[48%] truncate px-2">
-          <div className="flex items-center justify-center gap-2 max-w-full">
-            <h2 className="text-xs sm:text-sm md:text-base font-black text-white tracking-tight drop-shadow-md truncate">
-              {metadata.title}
-            </h2>
-            <span className="px-2 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 text-[10px] sm:text-[11px] font-black uppercase tracking-wider shrink-0 shadow-sm">
-              {activeServer.name || "Source 1"}
-            </span>
-          </div>
-          <span className="text-[10px] sm:text-xs text-white/60 font-semibold drop-shadow-sm truncate">
-            {isAnime && metadata.episode
-              ? `Episode ${metadata.episode}${metadata.episodeTitle ? ` • ${metadata.episodeTitle}` : ""}`
-              : metadata.season && metadata.episode
-              ? `S${metadata.season} E${metadata.episode}${metadata.episodeTitle ? ` • ${metadata.episodeTitle}` : ""}`
-              : metadata.year || ""}
-          </span>
-        </div>
-
-        {/* Right: Site Control Actions */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Episode selection (if TV/Anime with episodes) */}
-          {seasons && seasons.length > 0 && (
-            <button
-              onClick={() => {
-                setShowEpisodeCarousel(!showEpisodeCarousel);
-                setShowServerMenu(false);
-              }}
-              className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
-                showEpisodeCarousel
-                  ? "bg-white text-black shadow-lg"
-                  : "bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md"
-              }`}
-              title="Episode List"
-            >
-              <Layers className="w-4 h-4" />
-              <span className="hidden md:inline">Episodes</span>
-            </button>
-          )}
-
-          {/* Sources selection */}
-          <button
-            onClick={() => {
-              setShowServerMenu(!showServerMenu);
-              setShowEpisodeCarousel(false);
-            }}
-            className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
-              showServerMenu
-                ? "bg-white text-black shadow-lg"
-                : "bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md"
-            }`}
-            title="Switch Source"
-          >
-            <Cloud className="w-4 h-4" />
-            <span className="hidden md:inline">Sources</span>
-          </button>
-
-          {/* Next Source Button */}
-          {servers && servers.length > 1 && (
-            <button
-              onClick={handleNextSource}
-              className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
-              title="Next Source"
-            >
-              <SkipForward className="w-4 h-4 text-primary" />
-              <span className="hidden sm:inline">Next</span>
-            </button>
-          )}
-
-          {/* Play / Pause Toggle Button */}
-          <button
-            onClick={handleTogglePlay}
-            className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
-            title={isPlaying ? "Pause" : "Play"}
-          >
-            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-          </button>
-
-          {/* Reload Source Button */}
-          <button
-            onClick={handleReloadSource}
-            disabled={isReloading}
-            className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95 disabled:opacity-60"
-            title="Reload Current Source"
-          >
-            <RotateCcw className={`w-4 h-4 ${isReloading ? "animate-spin text-primary" : ""}`} />
-            <span className="hidden lg:inline">{isReloading ? "Reloading..." : "Reload"}</span>
-          </button>
-
-          {/* Fullscreen Toggle Button */}
-          <button
-            onClick={toggleFullscreen}
-            className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
-            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-          >
-            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-          </button>
-        </div>
-      </header>
-
-      {/* ── Main Streaming Viewport: Directly beneath top bar, completely unobstructed ── */}
-      <main className="flex-1 w-full relative min-h-0 bg-black flex items-center justify-center overflow-hidden z-10">
+      {/* ── Main Streaming Viewport: Fullscreen viewport, never shifts or creates black side bars (Base Layer: z-0) ── */}
+      <main
+        className="absolute inset-0 w-full h-full bg-black flex items-center justify-center overflow-hidden z-0 pointer-events-auto"
+        style={{ width: "100%", height: "100%" }}
+      >
         {/* Dynamic Ambient Glow Behind Screen */}
         <div
           className="absolute inset-0 -z-10 blur-3xl opacity-40 pointer-events-none transition-opacity duration-1000"
@@ -638,7 +716,11 @@ export function CinemaPlayer({
           }}
         />
 
-        <div key={reloadKey} className="w-full h-full relative flex items-center justify-center">
+        <div
+          key={reloadKey}
+          className="absolute inset-0 w-full h-full flex items-center justify-center"
+          style={{ width: "100%", height: "100%" }}
+        >
           {React.isValidElement(children)
             ? React.cloneElement(children as React.ReactElement<any>, {
                 onModeChange: setPlayerMode,
@@ -648,14 +730,327 @@ export function CinemaPlayer({
             : children}
         </div>
 
+        {/* ── Transparent Source Fullscreen Click Interceptor ──
+            Positioned over the bottom-right corner where video players (Megaplay, Vidnest, Embedmaster, etc.)
+            render their fullscreen button. Catches clicks with native user activation, triggering container
+            fullscreen so Cine-Stream's top bar and menu button are always visible on all sources. */}
+        <button
+          type="button"
+          aria-label={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+          title={isFullscreen ? "Exit Fullscreen (Press F)" : "Fullscreen (Press F)"}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFullscreen();
+          }}
+          className="absolute bottom-0 right-0 w-12 h-12 sm:w-14 sm:h-14 z-30 cursor-pointer bg-transparent hover:bg-white/[0.04] active:bg-white/10 transition-colors focus:outline-none touch-manipulation"
+        />
+
         {/* Reloading Source Floating Feedback */}
         {isReloading && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-black/90 border border-white/20 backdrop-blur-md text-xs font-bold text-white flex items-center gap-2 shadow-2xl animate-fade-in pointer-events-none">
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-black/90 border border-white/20 backdrop-blur-md text-xs font-bold text-white flex items-center gap-2 shadow-2xl animate-fade-in pointer-events-none">
             <RotateCcw className="w-4 h-4 animate-spin text-primary" />
             <span>Reloading current source...</span>
           </div>
         )}
       </main>
+
+      {/* ── Top Bar: Single Site Control Layer (Floating Overlay on tablet/desktop when showTopBar is true: z-50) ── */}
+      {showTopBar && (
+        <header className="hidden sm:flex absolute top-0 inset-x-0 h-14 sm:h-16 z-50 px-3 sm:px-6 items-center justify-between bg-zinc-950/85 border-b border-white/10 backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-150 pointer-events-auto shadow-2xl">
+          {/* Left: Back / Exit Button */}
+          <div className="flex items-center gap-2 shrink-0">
+            <Link
+              href={metadata.backUrl}
+              className="flex items-center gap-2 px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-2xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs border border-white/15 backdrop-blur-md transition-all shadow-md cursor-pointer shrink-0 group"
+              title="Back to Details"
+            >
+              <ArrowLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
+              <span className="hidden sm:inline">Back</span>
+            </Link>
+          </div>
+
+          {/* Center: Title & Episode Subtitle & Source Badge */}
+          <div className="flex flex-col items-center text-center max-w-[34%] sm:max-w-[48%] truncate px-2">
+            <div className="flex items-center justify-center gap-2 max-w-full">
+              <h2 className="text-xs sm:text-sm md:text-base font-black text-white tracking-tight drop-shadow-md truncate">
+                {metadata.title}
+              </h2>
+              <span className="px-2 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 text-[10px] sm:text-[11px] font-black uppercase tracking-wider shrink-0 shadow-sm">
+                {activeServer.name || "Source 1"}
+              </span>
+            </div>
+            <span className="text-[10px] sm:text-xs text-white/60 font-semibold drop-shadow-sm truncate">
+              {isAnime && metadata.episode
+                ? `Episode ${metadata.episode}${metadata.episodeTitle ? ` • ${metadata.episodeTitle}` : ""}`
+                : metadata.season && metadata.episode
+                ? `S${metadata.season} E${metadata.episode}${metadata.episodeTitle ? ` • ${metadata.episodeTitle}` : ""}`
+                : metadata.year || ""}
+            </span>
+          </div>
+
+          {/* Right: Site Control Actions */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* Episode selection (if TV/Anime with episodes) */}
+            {seasons && seasons.length > 0 && (
+              <button
+                onClick={() => {
+                  setShowEpisodeCarousel(!showEpisodeCarousel);
+                  setShowServerMenu(false);
+                }}
+                className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
+                  showEpisodeCarousel
+                    ? "bg-white text-black shadow-lg"
+                    : "bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md"
+                }`}
+                title="Episode List"
+              >
+                <Layers className="w-4 h-4" />
+                <span className="hidden md:inline">Episodes</span>
+              </button>
+            )}
+
+            {/* Sources selection */}
+            <button
+              onClick={() => {
+                setShowServerMenu(!showServerMenu);
+                setShowEpisodeCarousel(false);
+              }}
+              className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
+                showServerMenu
+                  ? "bg-white text-black shadow-lg"
+                  : "bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md"
+              }`}
+              title="Switch Source"
+            >
+              <Cloud className="w-4 h-4" />
+              <span className="hidden md:inline">Sources</span>
+            </button>
+
+            {/* Next Source Button */}
+            {servers && servers.length > 1 && (
+              <button
+                onClick={handleNextSource}
+                className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
+                title="Next Source"
+              >
+                <SkipForward className="w-4 h-4 text-primary" />
+                <span className="hidden sm:inline">Next</span>
+              </button>
+            )}
+
+            {/* Play / Pause Toggle Button */}
+            <button
+              onClick={handleTogglePlay}
+              className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
+              title={isPlaying ? "Pause" : "Play"}
+            >
+              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            </button>
+
+            {/* Reload Source Button */}
+            <button
+              onClick={handleReloadSource}
+              disabled={isReloading}
+              className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95 disabled:opacity-60"
+              title="Reload Current Source"
+            >
+              <RotateCcw className={`w-4 h-4 ${isReloading ? "animate-spin text-primary" : ""}`} />
+              <span className="hidden lg:inline">{isReloading ? "Reloading..." : "Reload"}</span>
+            </button>
+
+            {/* Fullscreen Toggle Button */}
+            <button
+              onClick={toggleFullscreen}
+              className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md bg-white/10 hover:bg-white/20 text-white border border-white/15 backdrop-blur-md active:scale-95"
+              title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+            >
+              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+            </button>
+
+            {/* Hide Top Bar Button (Brighter & on the right) */}
+            <button
+              onClick={handleToggleTopBar}
+              className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-2xl text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer shadow-lg bg-white/25 hover:bg-white/35 active:scale-95 text-white border border-white/40 hover:border-white/60 backdrop-blur-md hover:shadow-white/10 shrink-0 group"
+              title="Hide Top Bar (Press M to toggle)"
+            >
+              <ChevronUp className="w-4 h-4 text-white drop-shadow group-hover:-translate-y-0.5 transition-transform" />
+              <span className="hidden sm:inline text-white font-black tracking-wide">Hide</span>
+            </button>
+          </div>
+        </header>
+      )}
+
+      {/* ── Floating Top-Right Menu Button ──
+          Mobile: Always visible, toggles controls dropdown
+          Desktop: Visible ONLY when top bar is hidden, clicking it restores the top bar fully ── */}
+      <div className={`absolute top-3 right-3 z-50 pointer-events-auto ${showTopBar ? "sm:hidden" : ""}`}>
+        <button
+          data-menu-toggle="true"
+          onClick={handleMenuButtonClick}
+          className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-zinc-950/85 hover:bg-zinc-900/95 active:scale-95 text-white font-bold text-xs border border-white/20 backdrop-blur-xl shadow-2xl transition-all duration-200 cursor-pointer group hover:ring-2 hover:ring-primary/40 hover:scale-105"
+          title={showTopBar ? "Menu" : "Show Controls & Top Bar"}
+        >
+          {showDropdownMenu ? (
+            <X className="w-4 h-4 text-primary" />
+          ) : (
+            <Menu className="w-4 h-4 text-primary group-hover:scale-110 transition-transform" />
+          )}
+          <span className="text-[11px] font-extrabold tracking-wide text-white/90">
+            {showDropdownMenu ? "Close" : "Menu"}
+          </span>
+        </button>
+
+        {/* Floating Dropdown Menu Popover (Mobile Only) */}
+        {showDropdownMenu && (
+          <div
+            ref={dropdownRef}
+            className="sm:hidden absolute top-12 right-0 w-72 sm:w-80 max-h-[85vh] overflow-y-auto rounded-2xl bg-zinc-950/95 border border-white/15 backdrop-blur-2xl shadow-2xl p-3 space-y-2.5 animate-in fade-in zoom-in-95 duration-150 z-50 text-white select-none custom-scrollbar"
+          >
+            {/* Media Title & Current Info */}
+            <div className="px-2.5 py-2 rounded-xl bg-white/[0.05] border border-white/[0.08]">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-black truncate text-white">{metadata.title}</h3>
+                <span className="px-2 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 text-[9px] font-black uppercase shrink-0">
+                  {activeServer.name || "Source 1"}
+                </span>
+              </div>
+              <p className="text-[10px] text-white/60 font-semibold truncate mt-0.5">
+                {isAnime && metadata.episode
+                  ? `Episode ${metadata.episode}${metadata.episodeTitle ? ` • ${metadata.episodeTitle}` : ""}`
+                  : metadata.season && metadata.episode
+                  ? `S${metadata.season} E${metadata.episode}${metadata.episodeTitle ? ` • ${metadata.episodeTitle}` : ""}`
+                  : metadata.year || ""}
+              </p>
+            </div>
+
+            {/* Primary Top Action Buttons: Back & Fullscreen */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <Link
+                href={metadata.backUrl}
+                onClick={() => setShowDropdownMenu(false)}
+                className="flex items-center justify-center gap-1.5 p-2 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-xs font-bold transition-all border border-white/10 text-white cursor-pointer"
+                title="Back to Details"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Back</span>
+              </Link>
+
+              <button
+                type="button"
+                onClick={() => {
+                  toggleFullscreen();
+                  setShowDropdownMenu(false);
+                }}
+                className="flex items-center justify-center gap-1.5 p-2 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-xs font-bold transition-all border border-white/10 text-white cursor-pointer"
+                title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+              >
+                {isFullscreen ? <Minimize className="w-4 h-4 text-amber-400" /> : <Maximize className="w-4 h-4 text-sky-400" />}
+                <span>{isFullscreen ? "Exit Full" : "Fullscreen"}</span>
+              </button>
+            </div>
+
+            {/* Interactive Player Controls */}
+            <div className="space-y-1.5 pt-1 border-t border-white/10">
+              {/* Episodes Drawer (if TV/Anime) */}
+              {seasons && seasons.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowEpisodeCarousel(true);
+                    setShowServerMenu(false);
+                    setShowDropdownMenu(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-2 rounded-xl text-xs font-bold transition-all border cursor-pointer ${
+                    showEpisodeCarousel
+                      ? "bg-white text-black border-white"
+                      : "bg-white/10 hover:bg-white/20 text-white border-white/10"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-indigo-400" />
+                    <span>Episodes</span>
+                  </div>
+                  <span className="text-[10px] opacity-70">
+                    {metadata.season ? `S${metadata.season}` : ""} {metadata.episode ? `Ep ${metadata.episode}` : ""}
+                  </span>
+                </button>
+              )}
+
+              {/* Sources Switcher */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowServerMenu(true);
+                  setShowEpisodeCarousel(false);
+                  setShowDropdownMenu(false);
+                }}
+                className={`w-full flex items-center justify-between p-2 rounded-xl text-xs font-bold transition-all border cursor-pointer ${
+                  showServerMenu
+                    ? "bg-white text-black border-white"
+                    : "bg-white/10 hover:bg-white/20 text-white border-white/10"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Cloud className="w-4 h-4 text-emerald-400" />
+                  <span>Sources</span>
+                </div>
+                <span className="text-[10px] text-primary font-bold">
+                  {activeServer.name || "Source 1"}
+                </span>
+              </button>
+
+              {/* Next Source (if multiple servers available) */}
+              {servers && servers.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleNextSource();
+                  }}
+                  className="w-full flex items-center justify-between p-2 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-xs font-bold transition-all border border-white/10 text-white cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <SkipForward className="w-4 h-4 text-primary" />
+                    <span>Next Source</span>
+                  </div>
+                  <span className="text-[10px] text-white/50">Switch</span>
+                </button>
+              )}
+
+              {/* Play / Pause Toggle */}
+              <button
+                type="button"
+                onClick={() => {
+                  handleTogglePlay();
+                }}
+                className="w-full flex items-center justify-between p-2 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-xs font-bold transition-all border border-white/10 text-white cursor-pointer"
+              >
+                <div className="flex items-center gap-2">
+                  {isPlaying ? <Pause className="w-4 h-4 text-amber-400" /> : <Play className="w-4 h-4 text-emerald-400" />}
+                  <span>{isPlaying ? "Pause Video" : "Play Video"}</span>
+                </div>
+                <span className="text-[10px] text-white/50">{isPlaying ? "Playing" : "Paused"}</span>
+              </button>
+
+              {/* Reload Source */}
+              <button
+                type="button"
+                onClick={() => {
+                  handleReloadSource();
+                }}
+                disabled={isReloading}
+                className="w-full flex items-center justify-between p-2 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-xs font-bold transition-all border border-white/10 text-white cursor-pointer disabled:opacity-60"
+              >
+                <div className="flex items-center gap-2">
+                  <RotateCcw className={`w-4 h-4 ${isReloading ? "animate-spin text-primary" : "text-sky-400"}`} />
+                  <span>{isReloading ? "Reloading..." : "Reload Player"}</span>
+                </div>
+                <span className="text-[10px] text-white/50">Refresh</span>
+              </button>
+
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── Modal Backdrops ── */}
       {(showEpisodeCarousel || showServerMenu) && (

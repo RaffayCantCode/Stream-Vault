@@ -483,6 +483,8 @@ export default function AnimeClient({ initialData }: { initialData?: any | null 
         const urlParams = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
         const targetSeason = urlParams.get("seasonId") || id;
         setCurrentSeasonId(targetSeason);
+        // Instantly kick off episode loading in parallel with meta fetch
+        loadSeasonEpisodes(targetSeason, false).catch(() => {});
       }
 
       // 2) Fetch full meta from server (check session cache first)

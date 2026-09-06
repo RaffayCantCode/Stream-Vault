@@ -33,7 +33,7 @@ interface AnimeSeasonSelectorProps {
   animeTitle?: string;
 }
 
-const SPECIAL_REGEX = /\b(ova|oav|special|specials|chibi|mini|petit|gekijou|theater|theatre|spin-?off|picture\s+drama|audio\s+drama|recap|summary|digest|junior\s+high|omake|bonus|blooper|interlude|side\s+story|lost\s+girls|no\s+regrets|ilse|gakuen|sanpo|nikki|diaries|coleus|marumaru|mahou|henshu|preview|pv|tokubetsu|short|crossover|collab)\b/i;
+const SPECIAL_REGEX = /\b(ova|oav|special|specials|chibi|petit|spin-?off|picture\s+drama|audio\s+drama|recap|summary|digest|omake|bonus|blooper|interlude|side\s+story|lost\s+girls|no\s+regrets|ilse|slime\s+diaries|tensura\s+nikki|coleus\s+no\s+yume|marumaru\s+no\s+mahou|titan\s+junior\s+high|preview|pv|tokubetsu|collab|crossover)\b/i;
 const MOVIE_REGEX = /\b(movie|the\s+movie|film|theatrical|gekijouban|scarlet\s+bond|mugen\s+train|jujutsu\s+kaisen\s+0|two\s+heroes|heroes\s+rising|world\s+heroes|you'?re\s+next)\b/i;
 
 export function AnimeSeasonSelector({
@@ -122,18 +122,24 @@ export function AnimeSeasonSelector({
       const eps = item.totalEpisodes || item.episodes || 0;
       const duration = item.duration || 0;
 
+      const cleanCurr = String(currentAnimeId || "").trim().toLowerCase();
+      const itemId = String(item.id || "").trim().toLowerCase();
+      const isCurrentActive = itemId === cleanCurr || (item.idMal && String(item.idMal).toLowerCase() === cleanCurr);
+      const hasExplicitSeason = /\b(season\s*\d+|\d+(?:st|nd|rd|th)\s+season|final\s+season)\b/i.test(title);
+      const isChibiOrMini = (duration > 0 && duration <= 15);
+      const isAuthoritativeTv = fmt === "TV" && (eps >= 5 || hasExplicitSeason) && !isChibiOrMini;
+
       // 1. Specials (OVAs, Chibis, side stories, short ONAs, recaps, mini-series, collabs)
       const isSpecialFmt = fmt === "OVA" || fmt === "SPECIAL" || fmt === "TV_SHORT";
       const isSpecialLabel = label.startsWith("ova") || label.startsWith("special");
       const isSpecialTitle = SPECIAL_REGEX.test(title);
-      // Any ONA that does not explicitly say "season", "part", or "cour", or is short runtime (<= 15 min), is a special
-      const hasSeasonWord = /\b(season|part|cour)\b/i.test(title);
-      const isShortOna = fmt === "ONA" && (!hasSeasonWord || duration <= 15 || (eps > 0 && eps <= 4));
-      // Short / collab episodes (<= 2 episodes with duration <= 25 min, or collab " x ")
+      const isShortOna = fmt === "ONA" && (duration <= 15 || !hasExplicitSeason || (eps > 0 && eps <= 4));
       const isShortSpecial = eps > 0 && eps <= 2 && duration > 0 && duration <= 25 && fmt !== "MOVIE";
       const isCollabTitle = /\b(collab|crossover|\bx\b)\b/i.test(title);
 
-      if (isSpecialFmt || isSpecialLabel || isSpecialTitle || isShortOna || isShortSpecial || isCollabTitle) {
+      const isClassedSpecial = !isAuthoritativeTv && !isCurrentActive && (isSpecialFmt || isSpecialLabel || isSpecialTitle || isShortOna || isShortSpecial || isCollabTitle || isChibiOrMini);
+
+      if (isClassedSpecial) {
         specialsList.push(item);
         continue;
       }

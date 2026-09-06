@@ -110,7 +110,7 @@ export async function GET(
   excludeIds.add(String(id));
 
   // 1. Check in-memory cache
-  const cacheKey = `v4_${id}_${currentTitle.toLowerCase().trim()}_${reqFormat}`;
+  const cacheKey = `v5_${id}_${currentTitle.toLowerCase().trim()}_${reqFormat}`;
   const cached = RECS_CACHE.get(cacheKey) || (currentTitle ? RECS_CACHE.get(currentTitle.toLowerCase().trim()) : null);
   if (cached && Date.now() - cached.timestamp < RECS_TTL && cached.items.length >= 10) {
     return NextResponse.json(
@@ -177,6 +177,17 @@ export async function GET(
       if (!itemTitle) return false;
       const sId = String(item.id);
       if (excludeIds.has(sId)) return false;
+
+      // Never recommend specials, OVAs, or promotional shorts when looking for TV anime shows
+      if (!isMovieReq) {
+        const fmtUpper = String(item.format || item.type || "").toUpperCase();
+        const isSpecialFormat = fmtUpper === "SPECIAL" || fmtUpper === "OVA" || fmtUpper === "TV_SHORT" || fmtUpper === "MUSIC";
+        const hasSpecialTitle = /\b(special|specials|ova|oav|jump\s+festa|picture\s+drama|audio\s+drama|recap|side\s+story|omake|bonus|interlude)\b/i.test(itemTitle);
+        const isLowEpisodeSpecial = (item.episodes?.sub != null && item.episodes.sub <= 3) && (isSpecialFormat || hasSpecialTitle);
+        if (isSpecialFormat || hasSpecialTitle || isLowEpisodeSpecial) {
+          return false;
+        }
+      }
 
       // Strictly exclude any member of the current show's franchise
       if (isSameFranchise(itemTitle, currentTitle, excludeIds, item.id)) return false;
@@ -345,7 +356,7 @@ export async function GET(
 
             if (!resolvedId) {
               try {
-                const kSearch = await fetch(`https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(itemTitle)}&page[limit]=1`, {
+                const kSearch = await fetch(`https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(itemTitle)}&filter[subtype]=${targetSubtype}&sort=-userCount&page[limit]=1`, {
                   signal: AbortSignal.timeout(1800),
                   headers: { Accept: "application/vnd.api+json", "User-Agent": "CineStream/1.0" },
                 });

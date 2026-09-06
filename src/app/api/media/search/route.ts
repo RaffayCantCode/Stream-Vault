@@ -25,22 +25,35 @@ export async function GET(request: NextRequest) {
 
     // 1. Search TMDB (Movies & TV)
     if (mediaType === "all" || mediaType === "movie" || mediaType === "tv") {
-      const tmdbSearchUrl = `${TMDB_BASE_URL}/search/multi?query=${encodeURIComponent(query)}&include_adult=false&language=en-US&page=1`;
+      let tmdbSearchUrl = `${TMDB_BASE_URL}/search/multi?query=${encodeURIComponent(query)}&include_adult=false&language=en-US&page=1`;
+      if (mediaType === "movie") {
+        tmdbSearchUrl = `${TMDB_BASE_URL}/search/movie?query=${encodeURIComponent(query)}&include_adult=false&language=en-US&page=1`;
+      } else if (mediaType === "tv") {
+        tmdbSearchUrl = `${TMDB_BASE_URL}/search/tv?query=${encodeURIComponent(query)}&include_adult=false&language=en-US&page=1`;
+      }
+
       const tmdbData = await fetch(tmdbSearchUrl, { headers: tmdbHeaders, signal: AbortSignal.timeout(4000) })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
 
       if (tmdbData?.results) {
         for (const item of tmdbData.results) {
-          if (item.media_type !== "movie" && item.media_type !== "tv") continue;
+          const itemType = item.media_type || (mediaType === "movie" ? "movie" : mediaType === "tv" ? "tv" : (item.first_air_date ? "tv" : "movie"));
+          if (itemType !== "movie" && itemType !== "tv") continue;
           if (!item.poster_path && !item.backdrop_path) continue;
 
-          // Check if TMDB anime
+          // Check if TMDB anime (Animation genre + Japanese language)
           const isAnime = item.genre_ids?.includes(16) && item.original_language === "ja";
+
+          // If this is an anime, DO NOT return it as a regular movie/tv show!
+          // CineStream handles all anime through the dedicated anime section.
+          if (isAnime) {
+            continue;
+          }
 
           results.push({
             id: item.id,
-            media_type: item.media_type,
+            media_type: itemType,
             title: item.title || item.name || "",
             name: item.name || item.title || "",
             poster_path: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : "",
@@ -48,7 +61,9 @@ export async function GET(request: NextRequest) {
             release_date: item.release_date || item.first_air_date || "",
             vote_average: item.vote_average ? Number(item.vote_average.toFixed(1)) : 0,
             overview: item.overview || "",
-            isTmdbAnime: isAnime,
+            isTmdbAnime: false,
+            targetUrl: `/${itemType}/${item.id}`,
+            target_url: `/${itemType}/${item.id}`,
           });
         }
       }
@@ -104,6 +119,8 @@ export async function GET(request: NextRequest) {
               vote_average: item.averageScore ? Number((item.averageScore / 10).toFixed(1)) : 8.5,
               overview: item.description?.replace(/<[^>]*>?/gm, "") || "",
               isTmdbAnime: false,
+              targetUrl: `/anime/${item.id}`,
+              target_url: `/anime/${item.id}`,
             });
           }
         }
@@ -134,6 +151,8 @@ export async function GET(request: NextRequest) {
                 vote_average: attr.averageRating ? Number((parseFloat(attr.averageRating) / 10).toFixed(1)) : 8.0,
                 overview: attr.synopsis?.replace(/<[^>]*>?/gm, "") || "",
                 isTmdbAnime: false,
+                targetUrl: `/anime/kitsu-${item.id}`,
+                target_url: `/anime/kitsu-${item.id}`,
               });
             }
           }

@@ -33,17 +33,19 @@ const CARD_WRAPPER_STYLE: React.CSSProperties = {
 
 export function MediaCard({ item, index = 0, rank, priority, showMediaBadge = false }: MediaCardProps) {
   const isPerson = item.media_type === "person";
-  const isAnime = item.media_type === "anime" || (item as any).isTmdbAnime;
+  const rawTargetUrl = (item as any).targetUrl || (item as any).target_url;
+  const isAnime = item.media_type === "anime" || (item as any).isTmdbAnime || Boolean((item as any).anilistId) || String(rawTargetUrl || "").includes("/anime/");
   const isTv = item.media_type === "tv" || (!isPerson && !isAnime && !!item.first_air_date && !item.release_date);
   const isMovie = item.media_type === "movie" || (!isPerson && !isAnime && !isTv);
 
   const title = item.title || item.name || "";
-  let link = (item as any).targetUrl || (item as any).target_url;
-  if (!link) {
+  let link = rawTargetUrl;
+  if (isAnime && (!link || !link.startsWith("/anime/"))) {
+    const aId = (item as any).anilistId || item.id;
+    link = `/anime/${aId}`;
+  } else if (!link) {
     link = isPerson
       ? `/person/${item.id}`
-      : isAnime
-      ? `/anime/${item.id}`
       : isTv
       ? `/tv/${item.id}`
       : `/movie/${item.id}`;

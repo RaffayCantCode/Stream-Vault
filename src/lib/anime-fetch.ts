@@ -234,31 +234,37 @@ export async function anilistQuery(
   const cached = getAnilistCached<any>(key);
   if (cached) { recordPrimarySuccess(); return cached; }
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  // Fast Circuit Breaker: If AniList has had consecutive failures, skip immediately
+  if (!shouldAttemptPrimary()) {
+    return null;
+  }
+
+  const maxRetries = isPrimaryAvailable() ? retries : 0;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const res = await fetch(ANILIST_API, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json", "User-Agent": DEFAULT_FETCH_USER_AGENT },
         body: JSON.stringify({ query, variables }),
-        signal: AbortSignal.timeout(4500),
+        signal: AbortSignal.timeout(2500),
         next: { revalidate } as any,
       });
 
-      if (res.status === 429) {
-        if (attempt < retries) {
-          const delay = parseInt(res.headers.get("retry-after") || "0", 10) * 1000 || 800 * (attempt + 1);
-          if (delay <= 1500) { await new Promise(r => setTimeout(r, delay)); continue; }
-        }
+      if (res.status === 429 || res.status === 403 || res.status >= 500) {
         recordPrimaryFailure();
         return null;
       }
 
-      if (!res.ok) return null;
+      if (!res.ok) {
+        recordPrimaryFailure();
+        return null;
+      }
       const json = await res.json();
       if (json?.data) { recordPrimarySuccess(); setAnilistCached(key, json, revalidate); }
       return json;
     } catch {
-      if (attempt < retries) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue; }
+      if (attempt < maxRetries) { await new Promise(r => setTimeout(r, 250 * (attempt + 1))); continue; }
       recordPrimaryFailure();
       return null;
     }

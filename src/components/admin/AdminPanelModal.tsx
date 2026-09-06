@@ -176,6 +176,7 @@ export const AdminPanelModal = memo(function AdminPanelModal({ isOpen, onClose, 
 
   // ── Media Picker State (Used for Sections, Franchises, Spotlight) ──
   const [pickerSearchQuery, setPickerSearchQuery] = useState("");
+  const [pickerMediaType, setPickerMediaType] = useState<"all" | "movie" | "tv" | "anime">("all");
   const [pickerResults, setPickerResults] = useState<any[]>([]);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [draggedItemIndex, setDraggedItemIndex] = useState<number | null>(null);
@@ -501,14 +502,15 @@ export const AdminPanelModal = memo(function AdminPanelModal({ isOpen, onClose, 
   }, [isOpen, onClose]);
 
   // Unified Media Search for Item Picker
-  const searchMediaItems = useCallback(async (query: string) => {
+  const searchMediaItems = useCallback(async (query: string, type: "all" | "movie" | "tv" | "anime" = pickerMediaType) => {
     if (!query.trim()) {
       setPickerResults([]);
       return;
     }
     setPickerLoading(true);
     try {
-      const res = await fetch(`/api/media/search?q=${encodeURIComponent(query)}`);
+      const typeParam = type && type !== "all" ? `&type=${type}` : "";
+      const res = await fetch(`/api/media/search?q=${encodeURIComponent(query)}${typeParam}`);
       if (res.ok) {
         const json = await res.json();
         setPickerResults(json.results || []);
@@ -516,7 +518,7 @@ export const AdminPanelModal = memo(function AdminPanelModal({ isOpen, onClose, 
     } catch {} finally {
       setPickerLoading(false);
     }
-  }, []);
+  }, [pickerMediaType]);
 
   const renderPreviewBanner = () => {
     if (!previewingTheme) return null;
@@ -1150,63 +1152,117 @@ export const AdminPanelModal = memo(function AdminPanelModal({ isOpen, onClose, 
 
               {/* Media Picker */}
               <div className="space-y-2 pt-2 border-t border-zinc-800">
-                <label className="text-xs font-semibold text-zinc-400 uppercase flex items-center gap-1.5">
-                  <Search className="w-3.5 h-3.5 text-sky-400" />
-                  Search & Add Titles
-                </label>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <label className="text-xs font-semibold text-zinc-400 uppercase flex items-center gap-1.5">
+                    <Search className="w-3.5 h-3.5 text-sky-400" />
+                    Search & Add Titles
+                  </label>
+                  <div className="flex items-center gap-1 bg-black/50 p-1 rounded-xl border border-zinc-800 shrink-0">
+                    {(["all", "movie", "tv", "anime"] as const).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => {
+                          setPickerMediaType(t);
+                          if (pickerSearchQuery.trim()) {
+                            searchMediaItems(pickerSearchQuery, t);
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase transition-all cursor-pointer ${
+                          pickerMediaType === t
+                            ? t === "anime"
+                              ? "bg-purple-600 text-white shadow-md shadow-purple-600/30"
+                              : t === "movie"
+                              ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                              : t === "tv"
+                              ? "bg-amber-600 text-white shadow-md shadow-amber-600/30"
+                              : "bg-primary text-primary-foreground shadow-md shadow-primary/30"
+                            : "text-zinc-400 hover:text-white"
+                        }`}
+                      >
+                        {t === "all" ? "All" : t === "movie" ? "Movies" : t === "tv" ? "TV Shows" : "Anime"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <input
                   type="text"
                   value={pickerSearchQuery}
                   onChange={(e) => {
                     setPickerSearchQuery(e.target.value);
-                    searchMediaItems(e.target.value);
+                    searchMediaItems(e.target.value, pickerMediaType);
                   }}
-                  placeholder="Search Movies, TV Shows, Anime..."
+                  placeholder={
+                    pickerMediaType === "anime"
+                      ? "Search Anime from Anime section (AniList / Kitsu)..."
+                      : pickerMediaType === "movie"
+                      ? "Search Movies..."
+                      : pickerMediaType === "tv"
+                      ? "Search TV Shows..."
+                      : "Search Movies, TV Shows, Anime..."
+                  }
                   className="w-full px-3.5 py-2 rounded-xl bg-black/50 border border-zinc-800 text-white text-xs focus:outline-none focus:border-primary"
                 />
 
                 {pickerLoading && (
                   <div className="py-2 text-center text-xs text-zinc-500">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin inline mr-1" /> Searching catalog...
+                    <Loader2 className="w-3.5 h-3.5 animate-spin inline mr-1" /> Searching {pickerMediaType === "anime" ? "Anime catalog" : "catalog"}...
                   </div>
                 )}
 
                 {pickerResults.length > 0 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-44 sm:max-h-48 overflow-y-auto p-2 rounded-xl bg-black/50 border border-zinc-800/80 custom-scrollbar">
-                    {pickerResults.map((item) => (
-                      <div
-                        key={`${item.media_type}_${item.id}`}
-                        className="flex items-center justify-between gap-2 p-1.5 sm:p-2 rounded-lg bg-zinc-900/60 border border-zinc-800"
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {item.poster_path && <img src={item.poster_path} alt="" className="w-6 h-8 object-cover rounded shrink-0" />}
-                          <p className="text-[11px] font-semibold text-zinc-200 truncate">{item.title || item.name}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const current = Array.isArray(editingSection.items) ? editingSection.items : [];
-                            const cleanType = item.media_type || (item.first_air_date ? "tv" : "movie");
-                            const cleanTargetUrl = cleanType === "anime"
-                              ? `/anime/${item.anilistId || item.id}`
-                              : `/${cleanType}/${item.id}`;
-                            const fullItem = {
-                              ...item,
-                              id: Number(item.id) || item.id,
-                              media_type: cleanType,
-                              targetUrl: cleanTargetUrl,
-                              target_url: cleanTargetUrl,
-                            };
-                            setEditingSection({ ...editingSection, items: [...current, fullItem] });
-                            showToast("success", `Added ${item.title || item.name}`);
-                          }}
-                          className="p-1.5 sm:p-1 rounded-lg bg-primary text-primary-foreground hover:bg-primary/80 cursor-pointer shrink-0"
-                          title="Add to row"
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-2 rounded-xl bg-black/50 border border-zinc-800/80 custom-scrollbar">
+                    {pickerResults.map((item) => {
+                      const isItemAnime = item.media_type === "anime" || item.isTmdbAnime || Boolean(item.anilistId);
+                      const cleanType = isItemAnime ? "anime" : (item.media_type || (item.first_air_date ? "tv" : "movie"));
+                      return (
+                        <div
+                          key={`${item.media_type}_${item.id}`}
+                          className="flex items-center justify-between gap-2 p-1.5 sm:p-2 rounded-lg bg-zinc-900/60 border border-zinc-800"
                         >
-                          <Plus className="w-3.5 h-3.5 sm:w-3 sm:h-3" />
-                        </button>
-                      </div>
-                    ))}
+                          <div className="flex items-center gap-2 min-w-0">
+                            {item.poster_path && <img src={item.poster_path} alt="" className="w-6 h-8 object-cover rounded shrink-0 bg-zinc-800" />}
+                            <div className="min-w-0 flex flex-col">
+                              <p className="text-[11px] font-semibold text-zinc-200 truncate">{item.title || item.name}</p>
+                              <span className={`text-[8px] font-black uppercase px-1 py-0.2 rounded w-fit ${
+                                cleanType === "anime"
+                                  ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
+                                  : cleanType === "tv"
+                                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                                  : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                              }`}>
+                                {cleanType === "anime" ? "Anime" : cleanType === "tv" ? "TV" : "Movie"}
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const current = Array.isArray(editingSection.items) ? editingSection.items : [];
+                              const animeId = item.anilistId || item.id;
+                              const cleanTargetUrl = cleanType === "anime"
+                                ? `/anime/${animeId}`
+                                : `/${cleanType}/${item.id}`;
+                              const fullItem = {
+                                ...item,
+                                id: cleanType === "anime" ? String(animeId) : (Number(item.id) || item.id),
+                                anilistId: cleanType === "anime" ? String(animeId) : undefined,
+                                media_type: cleanType,
+                                targetUrl: cleanTargetUrl,
+                                target_url: cleanTargetUrl,
+                              };
+                              setEditingSection({ ...editingSection, items: [...current, fullItem] });
+                              showToast("success", `Added ${item.title || item.name} (${cleanType.toUpperCase()})`);
+                            }}
+                            className="p-1.5 sm:p-1 rounded-lg bg-primary text-primary-foreground hover:bg-primary/80 cursor-pointer shrink-0"
+                            title="Add to row"
+                          >
+                            <Plus className="w-3.5 h-3.5 sm:w-3 sm:h-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1223,37 +1279,51 @@ export const AdminPanelModal = memo(function AdminPanelModal({ isOpen, onClose, 
                   <p className="text-xs text-zinc-500 italic py-2">No titles added yet. Search above to add items to this row.</p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {editingSection.items?.map((it: any, itemIdx: number) => (
-                      <div
-                        key={itemIdx}
-                        draggable
-                        onDragStart={() => setDraggedItemIndex(itemIdx)}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={() => {
-                          if (draggedItemIndex === null || draggedItemIndex === itemIdx) return;
-                          const current = Array.isArray(editingSection.items) ? [...editingSection.items] : [];
-                          const [moved] = current.splice(draggedItemIndex, 1);
-                          current.splice(itemIdx, 0, moved);
-                          setEditingSection({ ...editingSection, items: current });
-                          setDraggedItemIndex(null);
-                        }}
-                        className={`flex items-center justify-between gap-2 p-2 rounded-xl border transition-all ${
-                          draggedItemIndex === itemIdx
-                            ? "bg-sky-500/10 border-sky-500/60 opacity-60"
-                            : "bg-zinc-900/60 border-zinc-800 hover:border-zinc-700"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <GripVertical className="w-3.5 h-3.5 text-zinc-500 shrink-0 cursor-grab active:cursor-grabbing hidden sm:block" />
-                          {it.poster_path && (
-                            <img
-                              src={it.poster_path.startsWith('http') ? it.poster_path : `https://image.tmdb.org/t/p/w92${it.poster_path}`}
-                              alt=""
-                              className="w-6 h-8 object-cover rounded shrink-0 bg-zinc-800"
-                            />
-                          )}
-                          <span className="text-xs font-semibold text-zinc-200 truncate">{it.title || it.name}</span>
-                        </div>
+                    {editingSection.items?.map((it: any, itemIdx: number) => {
+                      const isItemAnime = it.media_type === "anime" || it.isTmdbAnime || Boolean(it.anilistId) || String(it.targetUrl || it.target_url || "").includes("/anime/");
+                      const itType = isItemAnime ? "anime" : it.media_type === "tv" ? "tv" : "movie";
+                      return (
+                        <div
+                          key={itemIdx}
+                          draggable
+                          onDragStart={() => setDraggedItemIndex(itemIdx)}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={() => {
+                            if (draggedItemIndex === null || draggedItemIndex === itemIdx) return;
+                            const current = Array.isArray(editingSection.items) ? [...editingSection.items] : [];
+                            const [moved] = current.splice(draggedItemIndex, 1);
+                            current.splice(itemIdx, 0, moved);
+                            setEditingSection({ ...editingSection, items: current });
+                            setDraggedItemIndex(null);
+                          }}
+                          className={`flex items-center justify-between gap-2 p-2 rounded-xl border transition-all ${
+                            draggedItemIndex === itemIdx
+                              ? "bg-sky-500/10 border-sky-500/60 opacity-60"
+                              : "bg-zinc-900/60 border-zinc-800 hover:border-zinc-700"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <GripVertical className="w-3.5 h-3.5 text-zinc-500 shrink-0 cursor-grab active:cursor-grabbing hidden sm:block" />
+                            {it.poster_path && (
+                              <img
+                                src={it.poster_path.startsWith('http') ? it.poster_path : `https://image.tmdb.org/t/p/w92${it.poster_path}`}
+                                alt=""
+                                className="w-6 h-8 object-cover rounded shrink-0 bg-zinc-800"
+                              />
+                            )}
+                            <div className="min-w-0 flex flex-col">
+                              <span className="text-xs font-semibold text-zinc-200 truncate">{it.title || it.name}</span>
+                              <span className={`text-[8px] font-black uppercase px-1 py-0.2 rounded w-fit ${
+                                itType === "anime"
+                                  ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
+                                  : itType === "tv"
+                                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                                  : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                              }`}>
+                                {itType === "anime" ? "Anime" : itType === "tv" ? "TV" : "Movie"}
+                              </span>
+                            </div>
+                          </div>
 
                         <div className="flex items-center gap-1 shrink-0">
                           <button
@@ -1299,8 +1369,9 @@ export const AdminPanelModal = memo(function AdminPanelModal({ isOpen, onClose, 
                           </button>
                         </div>
                       </div>
-                    ))}
-                  </div>
+                    );
+                  })}
+                </div>
                 )}
               </div>
             </div>
